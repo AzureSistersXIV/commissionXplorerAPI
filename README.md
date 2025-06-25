@@ -6,7 +6,7 @@ To download the repository, follow these steps:
 
 1. Clone the repository using the following command:
     ```bash
-    git clone https://github.com/Fhurai/_CommissionsExplorer.git
+    git clone https://github.com/Fhurai/_CommissionExplorer.git
     ```
 2. Navigate to the project directory:
     ```bash
