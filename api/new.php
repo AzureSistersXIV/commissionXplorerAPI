@@ -9,8 +9,10 @@ require_once "./utilitaires.php";
 
 // Decode the JSON file containing SFW data
 $json = json_decode(file_get_contents("sfw.json"), true);
+$previousJson = $json;
 
-if($json === null){
+// If the JSON data is null, initialize it as an empty array
+if ($json === null) {
     $json = [];
 }
 
@@ -21,8 +23,8 @@ $repository = array_diff(scandir(json_decode(file_get_contents("api.json"), true
 $news = [];
 
 // Iterate through the repository to find new artists
-foreach($repository as $artist){
-    if(!array_key_exists($artist, $json)){
+foreach ($repository as $artist) {
+    if (!array_key_exists($artist, $json)) {
         $news[$artist] = false;
         $json[$artist] = false;
     }
@@ -31,8 +33,10 @@ foreach($repository as $artist){
 // Sort the JSON data naturally and case-insensitively
 ksort($json, SORT_NATURAL | SORT_FLAG_CASE);
 
-// Save the updated JSON data back to the file
-file_put_contents("sfw.json", json_encode($json));
+if ($previousJson !== $json) {
+    // If the JSON data has changed, save the updated JSON data back to the file
+    file_put_contents("sfw.json", json_encode($json));
+}
 
 // Output the new artists as a JSON response
 echo json_encode($news);
