@@ -1,0 +1,8 @@
+/commissions/*
+!/commissions/dummy.txt
+
+/thumbs/*
+!/thumbs/dummy.txt
+
+/api/api.json
+/api/sfw.json
