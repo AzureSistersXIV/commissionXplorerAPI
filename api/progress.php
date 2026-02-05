@@ -32,6 +32,11 @@ switch($action){
             $extension = pathinfo($file, PATHINFO_EXTENSION);
             return in_array($extension, ["jpg", "jpeg", "png", "gif"]);
         });
+
+        if(count($commFolder)=== 0){
+            $progress = 0;
+            break;
+        }
         
         // Create thumbnails folder if it doesn't exist
         if(!is_dir($repositories["thumbs"].$artist)){
