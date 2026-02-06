@@ -157,7 +157,7 @@ function getFullPaths(string $artwork): array
 
     $host = "../";
     $commPath = $artwork;
-    $thumbPath = str_replace("commissions/", "thumbs/", $artwork);
+    $thumbPath = str_replace("commissions/", "thumbs/", $artwork) . ".webp";
 
     // Check if the artwork file exists
     if (!file_exists("../" . $commPath)) {
