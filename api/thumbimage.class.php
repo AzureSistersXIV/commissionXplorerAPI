@@ -42,6 +42,11 @@ class ThumbImage
 		}
 		
 		try{
+			set_time_limit(300);
+			ini_set('memory_limit', '1024M');
+			
+			Imagick::setResourceLimit(Imagick::RESOURCETYPE_MEMORY, 512);
+			Imagick::setResourceLimit(Imagick::RESOURCETYPE_MAP, 512);
 
 			$thumb = new Imagick($this->source);
 			$thumb->setImageCompressionQuality(75);
