@@ -82,6 +82,7 @@ function explorePath(string $path, bool $remove = false): array
         'CLIP',
         'psd',
         'PSD',
+		'psb',
 
         // Brushes
         'abr',
@@ -136,6 +137,26 @@ function explorePath(string $path, bool $remove = false): array
                 $explored = array_merge($explored, explorePath($path . "/" . $file, $remove));
             }
         }
+    }
+	
+	$repositories = json_decode(file_get_contents("api.json"), true);
+	
+	if (str_starts_with($path, $repositories["thumbs"])) {
+
+        usort($explored, function ($a, $b) use ($repositories) {
+
+            $commissionA = str_replace($repositories["thumbs"], $repositories["commissions"], $a);
+            $commissionB = str_replace($repositories["thumbs"], $repositories["commissions"], $b);
+			
+			// remove thumbnail extension
+			$commissionA = preg_replace('/\.webp$/', '', $commissionA);
+			$commissionB = preg_replace('/\.webp$/', '', $commissionB);
+
+            $timeA = file_exists($commissionA) ? filemtime($commissionA) : 0;
+            $timeB = file_exists($commissionB) ? filemtime($commissionB) : 0;
+
+            return $timeB <=> $timeA; // newest first
+        });
     }
 
     return $explored;
