@@ -29,15 +29,30 @@ class ThumbImage
 	 *
 	 * @param string $destImagePath Path to save the thumbnail image.
 	 * @param int $thumbWidth Width of the thumbnail image. Default is 100.
+	 * @return bool True if thumbnail created successfully, false otherwise.
 	 */
     public function createThumb($destImagePath, $thumbWidth=100)
     {		
+		if (empty($this->source) || !file_exists($this->source)) {
+			return false;
+		}
+		
+		if (empty($destImagePath) || $thumbWidth <= 0) {
+			return false;
+		}
+		
 		try{
+
 			$thumb = new Imagick($this->source);
+			$thumb->setImageCompressionQuality(75);
 			$thumb->resizeImage($thumbWidth, 0, Imagick::FILTER_LANCZOS,1);
 			$thumb->writeImage($destImagePath);
+			$thumb->destroy();
+			
+			return true;
 		}catch(Exception $e){
-			// Handle exception if image processing fails.
+			error_log("Thumbnail creation failed: " . $e->getMessage());
+			return false;
 		}
     }
 }
