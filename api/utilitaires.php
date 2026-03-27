@@ -163,6 +163,70 @@ function explorePath(string $path, bool $remove = false): array
 }
 
 /**
+ * Get the most recent file in a directory (recursively) and its datetime.
+ *
+ * @param string $path The directory path to explore.
+ * @return array|null ['file' => string, 'datetime' => string] or null if none found
+ */
+function getLastFileWithDatetime(string $path): ?array
+{
+    if (!is_dir($path)) {
+        throw new Exception("The path provided is not a directory: " . $path);
+    }
+
+    $latestFile = null;
+    $latestTime = 0;
+
+    $files = array_filter(@scandir($path), function ($file) {
+        return $file !== "." && $file !== "..";
+    });
+
+    // Same ignore list (keep it consistent with your main function)
+    $toIgnore = [
+        'ini','db','db@SynoEAStream','png@SynoEAStream','psd@SynoEAStream','txt@SynoEAStream',
+        'clip','CLIP','psd','PSD','psb',
+        'abr',
+        'tif','TIF','tiff','TIFF',
+        'fbx','FBX','stl','STL','ztl','ZTL','tga','TGA','obj','OBJ',
+        '7z','7Z','zip','ZIP',
+    ];
+
+    foreach ($files as $file) {
+        $fullPath = $path . "/" . $file;
+
+        if (is_dir($fullPath)) {
+            // Recurse into subdirectories
+            $result = getLastFileWithDatetime($fullPath);
+
+            if ($result && strtotime($result['datetime']) > $latestTime) {
+                $latestTime = strtotime($result['datetime']);
+                $latestFile = $result['file'];
+            }
+        } else {
+            $extension = pathinfo($file, PATHINFO_EXTENSION);
+
+            if (!empty($extension) && !in_array($extension, $toIgnore)) {
+                $fileTime = filemtime($fullPath);
+
+                if ($fileTime > $latestTime) {
+                    $latestTime = $fileTime;
+                    $latestFile = $fullPath;
+                }
+            }
+        }
+    }
+
+    if ($latestFile === null) {
+        return null;
+    }
+
+    return [
+        'file' => $latestFile,
+        'datetime' => date('Y-m-d H:i:s', $latestTime),
+    ];
+}
+
+/**
  * Get the full paths for an artwork and its thumbnail.
  *
  * @param string $artwork The relative path to the artwork.

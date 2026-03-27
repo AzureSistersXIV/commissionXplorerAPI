@@ -28,6 +28,7 @@ foreach($artists as $artist => $sfw){
     if($isDir){
         // Explore the directory and sort the contents
         $folder = explorePath($repositories["thumbs"].$artist);
+		
         // Set the first item in the folder as the thumbnail or a default image
         $artists[$artist] = array_key_exists(0, $folder) ? $folder[0] : "./assets/img/folder.png";
     }else{
