@@ -3,7 +3,38 @@
 require_once "./thumbimage.class.php";
 
 // Array to hold file extensions to ignore
-$toIgnore = [];
+$toIgnore = [
+        'ini',
+        'db',
+        'db@SynoEAStream',
+        'png@SynoEAStream',
+        'psd@SynoEAStream',
+        'txt@SynoEAStream',
+        'clip',
+        'CLIP',
+        'psd',
+        'PSD',
+        'psb',
+        'abr',
+        'tif',
+        'TIF',
+        'tiff',
+        'TIFF',
+        'fbx',
+        'FBX',
+        'stl',
+        'STL',
+        'ztl',
+        'ZTL',
+        'tga',
+        'TGA',
+        'obj',
+        'OBJ',
+        '7z',
+        '7Z',
+        'zip',
+        'ZIP',
+    ];
 
 /**
  * Get a query parameter from the URL.
@@ -54,6 +85,8 @@ function getFormParameter(string $arg): mixed
  */
 function explorePath(string $path, bool $remove = false): array
 {
+    global $toIgnore;
+
     if (!is_dir($path)) {
         throw new Exception("The path provided is not a directory: " . $path);
     }
@@ -66,51 +99,6 @@ function explorePath(string $path, bool $remove = false): array
 
     // Files to remove.
     $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
-
-    // File extensions to ignore
-    $toIgnore = [
-        // System file format
-        'ini',
-        'db',
-        'db@SynoEAStream',
-        'png@SynoEAStream',
-        'psd@SynoEAStream',
-        'txt@SynoEAStream',
-
-        // File edition formats.
-        'clip',
-        'CLIP',
-        'psd',
-        'PSD',
-        'psb',
-
-        // Brushes
-        'abr',
-
-        // Unknown formats for thumbnails.
-        'tif',
-        'TIF',
-        'tiff',
-        'TIFF',
-
-        // 3D formats.
-        'fbx',
-        'FBX',
-        'stl',
-        'STL',
-        'ztl',
-        'ZTL',
-        'tga',
-        'TGA',
-        'obj',
-        'OBJ',
-
-        // Compressed files formats.
-        '7z',
-        '7Z',
-        'zip',
-        'ZIP',
-    ];
 
     foreach ($files as $key => $file) {
         // Check if the file should be removed
@@ -170,6 +158,8 @@ function explorePath(string $path, bool $remove = false): array
  */
 function getLastFileWithDatetime(string $path): ?array
 {
+    global $toIgnore;
+
     if (!is_dir($path)) {
         throw new Exception("The path provided is not a directory: " . $path);
     }
@@ -180,40 +170,6 @@ function getLastFileWithDatetime(string $path): ?array
     $files = array_filter(@scandir($path), function ($file) {
         return $file !== "." && $file !== "..";
     });
-
-    // Same ignore list (keep it consistent with your main function)
-    $toIgnore = [
-        'ini',
-        'db',
-        'db@SynoEAStream',
-        'png@SynoEAStream',
-        'psd@SynoEAStream',
-        'txt@SynoEAStream',
-        'clip',
-        'CLIP',
-        'psd',
-        'PSD',
-        'psb',
-        'abr',
-        'tif',
-        'TIF',
-        'tiff',
-        'TIFF',
-        'fbx',
-        'FBX',
-        'stl',
-        'STL',
-        'ztl',
-        'ZTL',
-        'tga',
-        'TGA',
-        'obj',
-        'OBJ',
-        '7z',
-        '7Z',
-        'zip',
-        'ZIP',
-    ];
 
     foreach ($files as $file) {
         $fullPath = $path . "/" . $file;
