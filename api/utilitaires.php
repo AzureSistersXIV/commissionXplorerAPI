@@ -82,7 +82,7 @@ function explorePath(string $path, bool $remove = false): array
         'CLIP',
         'psd',
         'PSD',
-		'psb',
+        'psb',
 
         // Brushes
         'abr',
@@ -138,19 +138,19 @@ function explorePath(string $path, bool $remove = false): array
             }
         }
     }
-	
-	$repositories = json_decode(file_get_contents("api.json"), true);
-	
-	if (str_starts_with($path, $repositories["thumbs"])) {
+
+    $repositories = json_decode(file_get_contents("api.json"), true);
+
+    if (str_starts_with($path, $repositories["thumbs"])) {
 
         usort($explored, function ($a, $b) use ($repositories) {
 
             $commissionA = str_replace($repositories["thumbs"], $repositories["commissions"], $a);
             $commissionB = str_replace($repositories["thumbs"], $repositories["commissions"], $b);
-			
-			// remove thumbnail extension
-			$commissionA = preg_replace('/\.webp$/', '', $commissionA);
-			$commissionB = preg_replace('/\.webp$/', '', $commissionB);
+
+            // remove thumbnail extension
+            $commissionA = preg_replace('/\.webp$/', '', $commissionA);
+            $commissionB = preg_replace('/\.webp$/', '', $commissionB);
 
             $timeA = file_exists($commissionA) ? filemtime($commissionA) : 0;
             $timeB = file_exists($commissionB) ? filemtime($commissionB) : 0;
@@ -183,12 +183,36 @@ function getLastFileWithDatetime(string $path): ?array
 
     // Same ignore list (keep it consistent with your main function)
     $toIgnore = [
-        'ini','db','db@SynoEAStream','png@SynoEAStream','psd@SynoEAStream','txt@SynoEAStream',
-        'clip','CLIP','psd','PSD','psb',
+        'ini',
+        'db',
+        'db@SynoEAStream',
+        'png@SynoEAStream',
+        'psd@SynoEAStream',
+        'txt@SynoEAStream',
+        'clip',
+        'CLIP',
+        'psd',
+        'PSD',
+        'psb',
         'abr',
-        'tif','TIF','tiff','TIFF',
-        'fbx','FBX','stl','STL','ztl','ZTL','tga','TGA','obj','OBJ',
-        '7z','7Z','zip','ZIP',
+        'tif',
+        'TIF',
+        'tiff',
+        'TIFF',
+        'fbx',
+        'FBX',
+        'stl',
+        'STL',
+        'ztl',
+        'ZTL',
+        'tga',
+        'TGA',
+        'obj',
+        'OBJ',
+        '7z',
+        '7Z',
+        'zip',
+        'ZIP',
     ];
 
     foreach ($files as $file) {
@@ -275,4 +299,88 @@ function getFullPaths(string $artwork): array
     }
 
     return [$host . $commPath, $host . $thumbPath];
+}
+
+/**
+ * Returns the percentage of thumbnail images relative to commission images
+ * for each artist listed in sfw.json.
+ *
+ * Assumes:
+ * - sfw.json contains a map like ["ArtistName" => true/false]
+ * - api.json contains repository paths under keys "thumbs" and "commissions"
+ *
+ * @return array<string, float> A map of artist names to percentage values
+ */
+function verifyPercentage(): array
+{
+    // Read the artist metadata file and decode the JSON into an associative array.
+    // If the file is missing or invalid, treat it as an empty list.
+    $artists = json_decode(file_get_contents("sfw.json"), true);
+
+    if ($artists === null) {
+        $artists = [];
+    }
+
+    $percentages = [];
+
+    // Evaluate every artist in the dataset and store their calculated percentage.
+    foreach ($artists as $artist => $sfw) {
+        $percentages[$artist] = getPercentage($artist);
+    }
+
+    return $percentages;
+}
+
+/**
+ * Calculates how many thumbnail images exist relative to the number of commission images
+ * for a specific artist.
+ *
+ * The ratio is clamped to 1.0 max, because a percentage above 100% is not meaningful
+ * in this context. If the artist has no commission images, the result is 0.0.
+ *
+ * @param string $artist Artist name/folder name used to locate their assets
+ * @return float Percentage value between 0.0 and 1.0
+ */
+function getPercentage(string $artist): float
+{
+    // Load repository paths from JSON config.
+    // Expected format:
+    // {
+    //   "thumbs": "/path/to/thumbs/",
+    //   "commissions": "/path/to/commissions/"
+    // }
+    $repositories = json_decode(file_get_contents("api.json"), true);
+
+    // Default to empty strings if the config keys are missing, to avoid warnings.
+    $thumbsBase = $repositories["thumbs"] ?? "";
+    $commissionsBase = $repositories["commissions"] ?? "";
+
+    // Explore the artist's thumbnails folder and commissions folder.
+    // These functions likely return arrays of filenames or file paths.
+    $thumbsPath = explorePath($thumbsBase . $artist);
+    $commsPath = explorePath($commissionsBase . $artist);
+
+    // Keep only valid image files in the commissions folder.
+    // Supported extensions are common web image formats.
+    $commFolder = array_filter($commsPath, function ($file) {
+        $extension = pathinfo($file, PATHINFO_EXTENSION);
+        return in_array($extension, ["jpg", "jpeg", "png", "PNG", "gif"]);
+    });
+
+    // If there are no commission images, return 0.0 to avoid division by zero.
+    if (count($commFolder) != 0) {
+        // Compute ratio of thumbnails to commissions.
+        $ratio = count($thumbsPath) / count($commFolder);
+
+        // Clamp the result to a maximum of 1.0
+        // because an artist cannot have more than 100% of the available commissions
+        // represented in thumbnails.
+        if ($ratio > 1.0) {
+            return 1.0;
+        }
+
+        return $ratio;
+    } else {
+        return 0.0;
+    }
 }

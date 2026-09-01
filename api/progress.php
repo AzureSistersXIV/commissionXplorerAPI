@@ -27,26 +27,7 @@ $progress = 0.0;
 // Handle different actions
 switch($action){
     case "thumbnails":
-        // Explore the commissions folder for the artist
-        $commFolder = array_filter(explorePath($repositories["commissions"].$artist), function($file){
-            $extension = pathinfo($file, PATHINFO_EXTENSION);
-            return in_array($extension, ["jpg", "jpeg", "png", "gif"]);
-        });
-
-        if(count($commFolder)=== 0){
-            $progress = 0;
-            break;
-        }
-        
-        // Create thumbnails folder if it doesn't exist
-        if(!is_dir($repositories["thumbs"].$artist)){
-            mkdir($repositories["thumbs"].$artist, 0755, true);
-        } 
-        // Explore the thumbnails folder for the artist
-        $thumbsFolder = explorePath($repositories["thumbs"].$artist);
-        
-        // Calculate progress as the ratio of thumbnails to commissions
-        $progress = count($thumbsFolder) / count($commFolder);
+        $progress = getPercentage($artist);
         break;
     default:
         // Throw an exception for unknown actions
