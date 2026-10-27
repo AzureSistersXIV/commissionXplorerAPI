@@ -30,10 +30,10 @@ foreach($artists as $artist => $sfw){
         $folder = explorePath($repositories["thumbs"].$artist);
 		
         // Set the first item in the folder as the thumbnail or a default image
-        $artists[$artist] = array_key_exists(0, $folder) ? $folder[0] : "./assets/img/folder.png";
+        $artists[$artist] = array_key_exists(0, $folder) ? $folder[0] : "./assets/img/folder.svg";
     }else{
         // Set a default image if the directory does not exist
-        $artists[$artist] = "./assets/img/folder.png";
+        $artists[$artist] = "./assets/img/folder.svg";
     }
 }
 
