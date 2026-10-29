@@ -46,8 +46,6 @@ foreach (glob(sys_get_temp_dir() . '/artist_thumbs_*.json') as $cacheFile) {
     }
 }
 
-file_put_contents('php://stderr', date('[Y-m-d H:i:s] ') . "Debug4: " . print_r($artists, true) . "\n");
-
 // Iterate through each artist and set the thumbnail path[cite: 2]
 foreach ($artists as $artist => $sfw) {
     $isDir = is_dir($repositories["thumbs"] . $artist);
@@ -62,8 +60,6 @@ foreach ($artists as $artist => $sfw) {
         $artists[$artist] = "./assets/img/folder.svg";
     }
 }
-
-file_put_contents('php://stderr', date('[Y-m-d H:i:s] ') . "Debug1: " . "\n");
 
 // Explore the artist's commissions folder.[cite: 2]
 // The second argument keeps the existing behaviour of deleting[cite: 2]
