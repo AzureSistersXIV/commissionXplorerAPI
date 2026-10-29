@@ -17,7 +17,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once "./utilitaires.php";
 
 // Load artists data from JSON file
-$artists = json_decode(file_get_contents("sfw.json"), true);
+$artists = json_decode(file_get_contents("levels.json"), true);
 // Load the path to commissions from the configuration file
 $pathCommission = json_decode(file_get_contents("api.json"), true)['commissions'];
 $pathThumbs = json_decode(file_get_contents("api.json"), true)['thumbs'];

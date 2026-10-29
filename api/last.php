@@ -9,19 +9,22 @@ header('Content-Type: application/json; charset=utf-8');
 require_once "./utilitaires.php";
 
 // Load artists data from JSON file
-$artists = json_decode(file_get_contents("sfw.json"), true);
+$artists = json_decode(file_get_contents("levels.json"), true);
 
 if ($artists === null) {
     $artists = [];
 }
 
+// Get the 'isNsfw' query parameter and parse it to determine the maximum level of NSFW content to include
+$query = parseMaxLevel(getQueryParameter("isNsfw"));
+
+// Filter the artists array to include only those with a level less than or equal to the parsed query parameter
+$artists = array_filter($artists, function ($artist) use ($query) : bool {
+    return $artist <= $query; // Keep artists with a level less than or equal to the query parameter
+});
+
 // Load repository paths from JSON file
 $repositories = json_decode(file_get_contents("api.json"), true);
-
-// Filter artists based on the 'isNsfw' query parameter
-$artists = array_filter($artists, function ($artist): bool {
-    return $artist === (!getQueryParameter("isNsfw") || getQueryParameter("isNsfw") !== "true");
-});
 
 // Iterate through each artist and set the thumbnail path
 foreach ($artists as $artist => $sfw) {

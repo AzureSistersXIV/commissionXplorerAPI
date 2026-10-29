@@ -25,7 +25,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once "./utilitaires.php";
 
 // Load artists data from JSON file
-$json = json_decode(file_get_contents("sfw.json"), true);
+$json = json_decode(file_get_contents("levels.json"), true);
 $result = 0;
 
 if($json === null){
@@ -52,7 +52,7 @@ foreach($json as $key => $value){
 
 if($result === 1){
     // Save the updated JSON data back to the file
-    file_put_contents("sfw.json", json_encode($json));
+    file_put_contents("levels.json", json_encode($json));
     
     echo json_encode(["result" => true]);
 } else {
