@@ -1,5 +1,8 @@
 <?php
 
+const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
+const TRUE_LEVEL = 2;          // what ?isNsfw=true means
+
 require_once "./thumbimage.class.php";
 
 // Array to hold file extensions to ignore
@@ -77,77 +80,127 @@ function getFormParameter(string $arg): mixed
 }
 
 /**
- * Explore a directory path and optionally remove certain files.
- *
- * @param string $path The directory path to explore.
- * @param bool $remove Whether to remove certain files.
- * @return array An array of explored file paths.
+ * Give the max level of nsfw based on the raw input.
+ * @param mixed $raw The raw input value to parse.
+ * @return int The parsed max level of nsfw (0 to MAX_LEVEL).
  */
-function explorePath(string $path, bool $remove = false): array
+function parseMaxLevel(?string $raw): int
+{
+    if ($raw === null) {
+        return 0;
+    }
+
+    $lower = strtolower($raw);
+    if ($lower === 'true')  return TRUE_LEVEL;
+    if ($lower === 'false') return 0;
+
+    if (ctype_digit($raw)) {
+        return min((int)$raw, MAX_LEVEL);
+    }
+
+    return 0;
+}
+
+/**
+ * Get the paths to repositories
+ * @return array
+ */
+function getRepositories(): array
+{
+    static $repos = null;
+    return $repos ??= json_decode(file_get_contents("api.json"), true);
+}
+
+/** Recursively list files. No sorting, no config reads. */
+function collectFiles(string $path, bool $remove = false): array
 {
     global $toIgnore;
 
-    if (!is_dir($path)) {
-        throw new Exception("The path provided is not a directory: " . $path);
+    $entries = @scandir($path);
+    if ($entries === false) {
+        return [];
     }
 
-    $explored = [];
-    // Get the list of files in the directory, excluding "." and ".."
-    $files = array_filter(@scandir($path), function ($file) {
-        return $file !== "." && $file !== "..";
-    });
-
-    // Files to remove.
     $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
+    $out = [];
 
-    foreach ($files as $key => $file) {
-        // Check if the file should be removed
-        if (in_array($file, $toRemove) && $remove) {
-            if (is_dir($path . "/" . $file)) {
-                // Remove the directory and its contents
-                system('rm -rf -- ' . escapeshellarg($path . "/" . $file), $retval);
-            } else {
-                // Remove the file
-                unlink($path . "/" . $file);
-            }
-        } else {
-            // Get the file extension
-            $extension = pathinfo($file, PATHINFO_EXTENSION);
+    foreach ($entries as $entry) {
+        if ($entry === "." || $entry === "..") continue;
+        $full = $path . "/" . $entry;
 
-            if (!empty($extension)) {
-                // Check if the file extension is not in the ignore list
-                if (!in_array($extension, $toIgnore)) {
-                    $explored[] = $path . "/" . $file;
-                }
-            } else {
-                // If the file has no extension, explore it as a directory
-                unset($files[$key]);
-                $explored = array_merge($explored, explorePath($path . "/" . $file, $remove));
+        // Junk entries: delete if asked, always skip otherwise
+        if (in_array($entry, $toRemove, true)) {
+            if ($remove) {
+                is_dir($full)
+                    ? system('rm -rf -- ' . escapeshellarg($full))
+                    : unlink($full);
             }
+            continue;
+        }
+
+        if (is_dir($full)) {
+            array_push($out, ...collectFiles($full, $remove));
+            continue;
+        }
+
+        $ext = pathinfo($entry, PATHINFO_EXTENSION);
+        if ($ext !== "" && !in_array($ext, $toIgnore, true)) {
+            $out[] = $full;
         }
     }
 
-    $repositories = json_decode(file_get_contents("api.json"), true);
+    return $out;
+}
 
-    if (str_starts_with($path, $repositories["thumbs"])) {
+/** Map a thumbnail path to its original commission file's mtime. */
+function commissionMtime(string $thumb, array $repos): int
+{
+    $orig = str_replace($repos["thumbs"], $repos["commissions"], $thumb);
+    $orig = preg_replace('/\.webp$/', '', $orig);
+    return @filemtime($orig) ?: 0;
+}
 
-        usort($explored, function ($a, $b) use ($repositories) {
+function explorePath(string $path, bool $remove = false): array
+{
+    if (!is_dir($path)) {
+        return [];
+    }
 
-            $commissionA = str_replace($repositories["thumbs"], $repositories["commissions"], $a);
-            $commissionB = str_replace($repositories["thumbs"], $repositories["commissions"], $b);
+    $explored = collectFiles($path, $remove);
+    $repos = getRepositories();
 
-            // remove thumbnail extension
-            $commissionA = preg_replace('/\.webp$/', '', $commissionA);
-            $commissionB = preg_replace('/\.webp$/', '', $commissionB);
-
-            $timeA = file_exists($commissionA) ? filemtime($commissionA) : 0;
-            $timeB = file_exists($commissionB) ? filemtime($commissionB) : 0;
-
-            return $timeB <=> $timeA; // newest first
-        });
+    if (str_starts_with($path, $repos["thumbs"])) {
+        // One stat per file, one sort for the whole tree
+        $times = [];
+        foreach ($explored as $f) {
+            $times[$f] = commissionMtime($f, $repos);
+        }
+        usort($explored, fn($a, $b) => $times[$b] <=> $times[$a]);
     }
 
     return $explored;
+}
+
+/** Newest thumbnail of a folder without sorting: a single max() pass. */
+function newestThumbnail(string $path): ?string
+{
+    if (!is_dir($path)) {
+        return null;
+    }
+
+    $repos = getRepositories();
+    $best = null;
+    $bestTime = -1;
+
+    foreach (collectFiles($path) as $f) {
+        $t = commissionMtime($f, $repos);
+        if ($t > $bestTime) {
+            $bestTime = $t;
+            $best = $f;
+        }
+    }
+
+    return $best;
 }
 
 /**
@@ -259,10 +312,10 @@ function getFullPaths(string $artwork): array
 
 /**
  * Returns the percentage of thumbnail images relative to commission images
- * for each artist listed in sfw.json.
+ * for each artist listed in levels.json.
  *
  * Assumes:
- * - sfw.json contains a map like ["ArtistName" => true/false]
+ * - levels.json contains a map like ["ArtistName" => 0-4]
  * - api.json contains repository paths under keys "thumbs" and "commissions"
  *
  * @return array<string, float> A map of artist names to percentage values
@@ -271,7 +324,7 @@ function verifyPercentage(): array
 {
     // Read the artist metadata file and decode the JSON into an associative array.
     // If the file is missing or invalid, treat it as an empty list.
-    $artists = json_decode(file_get_contents("sfw.json"), true);
+    $artists = json_decode(file_get_contents("levels.json"), true);
 
     if ($artists === null) {
         $artists = [];

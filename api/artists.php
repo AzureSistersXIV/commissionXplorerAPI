@@ -4,42 +4,50 @@ header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Headers: Content-Type");
 header('Content-Type: application/json; charset=utf-8');
 
-// Include utility functions
+// Include utility functions (must provide getRepositories() and newestThumbnail())
 require_once "./utilitaires.php";
 
+const DEFAULT_THUMB = "./assets/img/folder.svg";
+const CACHE_TTL = 600; // seconds
+
+// Parse the 'isNsfw' query parameter into a maximum NSFW level.
+// Read $_GET directly so ?isNsfw[]=1 can't trigger a TypeError.
+$rawNsfw = $_GET["isNsfw"] ?? null;
+$maxLevel = parseMaxLevel(is_string($rawNsfw) ? $rawNsfw : null);
+
+// Serve from cache when it is fresh and newer than levels.json
+$cacheFile = sys_get_temp_dir() . "/artist_thumbs_{$maxLevel}.json";
+if (
+    is_file($cacheFile)
+    && time() - filemtime($cacheFile) < CACHE_TTL
+    && filemtime($cacheFile) >= filemtime("levels.json")
+) {
+    readfile($cacheFile);
+    exit;
+}
+
 // Load artists data from JSON file
-$artists = json_decode(file_get_contents("sfw.json"), true);
+$artists = json_decode(file_get_contents("levels.json"), true) ?? [];
 
-if($artists === null){
-    $artists = [];
+// Keep only artists whose level is less than or equal to the allowed level
+$artists = array_filter($artists, fn($level): bool => $level <= $maxLevel);
+
+// Resolve each artist's thumbnail: the one whose original commission is newest
+$thumbsBase = getRepositories()["thumbs"];
+
+foreach ($artists as $artist => $level) {
+    $artists[$artist] = newestThumbnail($thumbsBase . $artist) ?? DEFAULT_THUMB;
 }
 
-// Load repository paths from JSON file
-$repositories = json_decode(file_get_contents("api.json"), true);
-
-// Filter artists based on the 'isNsfw' query parameter
-$artists = array_filter($artists, function($artist): bool{
-    return $artist === (!getQueryParameter("isNsfw") || getQueryParameter("isNsfw") !== "true");
-});
-
-// Iterate through each artist and set the thumbnail path
-foreach($artists as $artist => $sfw){
-    $isDir = is_dir($repositories["thumbs"].$artist);
-    if($isDir){
-        // Explore the directory and sort the contents
-        $folder = explorePath($repositories["thumbs"].$artist);
-		
-        // Set the first item in the folder as the thumbnail or a default image
-        $artists[$artist] = array_key_exists(0, $folder) ? $folder[0] : "./assets/img/folder.svg";
-    }else{
-        // Set a default image if the directory does not exist
-        $artists[$artist] = "./assets/img/folder.svg";
-    }
-}
-
-// Sort artists array naturally and case-insensitively
+// Sort artists naturally and case-insensitively
 ksort($artists, SORT_NATURAL | SORT_FLAG_CASE);
 
-// Output the artists array as a JSON response
+$json = json_encode($artists);
 
-echo json_encode($artists);
+// Write the cache atomically so concurrent requests never read a partial file
+$tmp = $cacheFile . "." . getmypid() . ".tmp";
+if (file_put_contents($tmp, $json, LOCK_EX) !== false) {
+    rename($tmp, $cacheFile);
+}
+
+echo $json;
