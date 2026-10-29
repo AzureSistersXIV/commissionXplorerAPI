@@ -46,21 +46,6 @@ foreach (glob(sys_get_temp_dir() . '/artist_thumbs_*.json') as $cacheFile) {
     }
 }
 
-// Iterate through each artist and set the thumbnail path[cite: 2]
-foreach ($artists as $artist => $sfw) {
-    $isDir = is_dir($repositories["thumbs"] . $artist);
-    if ($isDir) {
-        // Explore the directory and sort the contents[cite: 2]
-        $folder = explorePath($repositories["thumbs"] . $artist);
-
-        // Set the first item in the folder as the thumbnail or a default image[cite: 2]
-        $artists[$artist] = array_key_exists(0, $folder) ? $folder[0] : "./assets/img/folder.svg";
-    } else {
-        // Set a default image if the directory does not exist[cite: 2]
-        $artists[$artist] = "./assets/img/folder.svg";
-    }
-}
-
 // Explore the artist's commissions folder.[cite: 2]
 // The second argument keeps the existing behaviour of deleting[cite: 2]
 // desktop.ini / Thumbs.db / @eaDir while scanning.[cite: 2]
