@@ -16,7 +16,17 @@
             <li>
                 <!-- Artists section with links to SFW and NSFW artists -->
                 <h3>Artists</h3>
+                <span><a target="_blank" href="./new.php">New</a></span>
+                <hr>
                 <span><a target="_blank" href="./artists.php">SFW</a> : <a target="_blank" href="./artists.php?isNsfw=true">NSFW</a></span>
+                <hr>
+                <span>
+                    <a target="_blank" href="./artists.php">Regular</a> : 
+                    <a target="_blank" href="./artists.php?isNsfw=1">Suggestive</a> :
+                    <a target="_blank" href="./artists.php?isNsfw=2">Nude</a> :
+                    <a target="_blank" href="./artists.php?isNsfw=3">Sexual</a> :
+                    <a target="_blank" href="./artists.php?isNsfw=4">Extra NSFW</a>
+                </span>
             </li>
             <li>
                 <!-- Artworks section with a form to search artworks by artist name -->
