@@ -15,6 +15,8 @@ const CACHE_TTL = 600; // seconds
 $rawNsfw = $_GET["isNsfw"] ?? null;
 $maxLevel = parseMaxLevel(is_string($rawNsfw) ? $rawNsfw : null);
 
+$inclusive = filter_var($_GET["inclusive"] ?? false, FILTER_VALIDATE_BOOLEAN);
+
 // Serve from cache when it is fresh and newer than levels.json
 $cacheFile = sys_get_temp_dir() . "/artist_thumbs_{$maxLevel}.json";
 if (
@@ -29,8 +31,18 @@ if (
 // Load artists data from JSON file
 $artists = json_decode(file_get_contents("levels.json"), true) ?? [];
 
-// Keep only artists whose level is less than or equal to the allowed level
-$artists = array_filter($artists, fn($level): bool => $level <= $maxLevel);
+if (!is_numeric($rawNsfw) && $rawNsfw === "true") {
+    $artists = array_filter(
+        $artists,
+        fn($level): bool => in_array($level, [1, 2], true)
+    );
+} else {
+    $artists = array_filter(
+        $artists,
+        fn($level): bool =>
+            $inclusive ? ($level <= $maxLevel) : ($level === $maxLevel)
+    );
+}
 
 // Resolve each artist's thumbnail: the one whose original commission is newest
 $thumbsBase = getRepositories()["thumbs"];
