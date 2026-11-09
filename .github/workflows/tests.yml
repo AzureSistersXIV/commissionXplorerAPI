@@ -27,7 +27,7 @@ jobs:
         run: |
           set -o pipefail
           printf 'API test run: %s\nCommit: %s\n\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee test.log
-          ./run-tests.sh 2>&1 | tee -a test.log
+          sh ./run-tests.sh 2>&1 | tee -a test.log
 
       - name: Upload test log
         if: always()
