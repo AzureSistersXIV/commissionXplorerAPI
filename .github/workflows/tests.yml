@@ -1,0 +1,62 @@
+name: API tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: imagick
+
+      - name: Run tests and write log
+        id: tests
+        shell: bash
+        run: |
+          set -o pipefail
+          printf 'API test run: %s\nCommit: %s\n\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee test.log
+          ./run-tests.sh 2>&1 | tee -a test.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-log-${{ github.run_id }}
+          path: test.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "::warning::Discord notification skipped; configure the DISCORD_WEBHOOK_URL repository secret."
+            exit 0
+          fi
+
+          message="API tests ${TEST_OUTCOME} for ${REPOSITORY} (${REF_NAME}). Run: ${RUN_URL}"
+          payload=$(jq -n --arg content "$message" '{content: $content}')
+          curl --fail-with-body --silent --show-error \
+            --retry 2 --retry-delay 2 --max-time 15 \
+            -H 'Content-Type: application/json' \
+            --data "$payload" \
+            "$DISCORD_WEBHOOK_URL"
