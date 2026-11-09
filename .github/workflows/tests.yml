@@ -42,21 +42,47 @@ jobs:
         if: success()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TEST_OUTCOME: ${{ steps.tests.outcome }}
-          REPOSITORY: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          COMMIT_SHA: ${{ github.sha }}
+          TEST_RESULT: ${{ steps.tests.outcome }}
         shell: bash
         run: |
-          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "::warning::Discord notification skipped; configure the DISCORD_WEBHOOK_URL repository secret."
+            echo "Discord notification skipped: add the repository Actions secret \`DISCORD_WEBHOOK_URL\`." \
+              >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          message="API tests ${TEST_OUTCOME} for ${REPOSITORY} (${REF_NAME}). Run: ${RUN_URL}"
-          payload=$(jq -n --arg content "$message" '{content: $content}')
-          curl --fail-with-body --silent --show-error \
-            --retry 2 --retry-delay 2 --max-time 15 \
+          python3 - <<'PY' > discord-payload.json
+          import json
+          import os
+
+          run_url = os.environ["RUN_URL"]
+          payload = {
+              "allowed_mentions": {"parse": []},
+              "embeds": [{
+                  "title": f"GitHub Actions SUCCEEDED — run {os.environ['RUN_ID']}",
+                  "url": run_url,
+                  "description": (
+                      f"**API tests:** {os.environ['TEST_RESULT']}\n"
+                      f"[Workflow run]({run_url})"
+                  ),
+                  "color": 0x2ECC71,
+                  "footer": {
+                      "text": (
+                          f"Attempt {os.environ['RUN_ATTEMPT']} · "
+                          f"commit {os.environ['COMMIT_SHA'][:7]}"
+                      )
+                  },
+              }],
+          }
+          print(json.dumps(payload))
+          PY
+
+          curl --fail --silent --show-error --max-time 15 \
             -H 'Content-Type: application/json' \
-            --data "$payload" \
+            --data-binary @discord-payload.json \
             "$DISCORD_WEBHOOK_URL"
