@@ -2,10 +2,16 @@
 /**
  * Audits the generated thumbnails and optionally repairs the defective ones.
  *
+ * Thumbnail format: the focused side is THUMB_SIZE pixels. It is the HEIGHT for
+ * landscape sources and the WIDTH for portrait or square sources (see
+ * ThumbImage::createThumb()). Thumbnails made with the old format (always
+ * THUMB_SIZE wide) are reported as defective on landscape sources and replaced
+ * by --fix.
+ *
  * Place this file next to thumbimage.class.php (the api folder) and run from the CLI:
  *
- *   php audit_thumbs.php                  report only, GIF thumbnails checked in depth
- *   php audit_thumbs.php --all-deep       also compare non-GIF thumbnails with a fresh one
+ *   php audit_thumbs.php                  report only, cut-looking thumbnails are compared
+ *   php audit_thumbs.php --all-deep       force the content comparison for every thumbnail
  *   php audit_thumbs.php --fix            replace defective thumbnails with fresh ones
  *   php audit_thumbs.php /other/root      project root holding thumbs/ and commissions/
  *   php audit_thumbs.php --verbose        also list the thumbnails that are fine
@@ -15,9 +21,10 @@
  * after its top rows is still a valid WebP file of normal-looking size).
  *
  *   1. integrity   the WebP container is complete (declared size == real size)
- *   2. dimensions  the width is the expected one
+ *   2. dimensions  the focused side (height if landscape, width otherwise) is the expected one
  *   3. weight      very light files are flagged as suspicious
- *   4. content     the thumbnail is compared with a freshly generated one; a cut
+ *   4. shape       a solid black bottom band hints at a cut (partially decoded) thumbnail
+ *   5. content     the thumbnail is compared with a freshly generated one; a cut
  *                  thumbnail differs strongly, an older encode differs very little
  */
 if (PHP_SAPI !== 'cli') {
@@ -26,7 +33,7 @@ if (PHP_SAPI !== 'cli') {
 
 require __DIR__ . '/thumbimage.class.php';
 
-const EXPECTED_WIDTH = 250;       // width passed to createThumb() in getFullPaths()
+const THUMB_SIZE = 250;           // size passed to createThumb() in getFullPaths(): height for landscape, width otherwise
 const TINY_BYTES = 1500;          // below this a thumbnail is flagged as suspiciously light
 const MAX_CONTENT_ERROR = 0.002;  // normalised mean square error tolerated vs a fresh thumbnail
 
@@ -58,6 +65,35 @@ function webpIsComplete(string $path): bool
 	return $declared + 8 === filesize($path);
 }
 
+/**
+ * Checks the focused side of a thumbnail against THUMB_SIZE.
+ * Landscape source (width > height): the height must be THUMB_SIZE.
+ * Portrait or square source: the width must be THUMB_SIZE.
+ * When the source geometry cannot be read, accepts either side being THUMB_SIZE.
+ *
+ * @param array      $thumbInfo  getimagesize() result of the thumbnail.
+ * @param array|false $sourceInfo getimagesize() result of the source.
+ * @return string|null A problem description, or null if the dimensions are fine.
+ */
+function dimensionProblem(array $thumbInfo, $sourceInfo): ?string
+{
+	[$w, $h] = $thumbInfo;
+	if ($sourceInfo === false || $sourceInfo[0] <= 0 || $sourceInfo[1] <= 0) {
+		if ($w !== THUMB_SIZE && $h !== THUMB_SIZE) {
+			return "size {$w}x{$h}, neither side is " . THUMB_SIZE;
+		}
+		return null;
+	}
+	if ($sourceInfo[0] > $sourceInfo[1]) {
+		return $h !== THUMB_SIZE
+			? "height $h instead of " . THUMB_SIZE . " (landscape source, size {$w}x{$h})"
+			: null;
+	}
+	return $w !== THUMB_SIZE
+		? "width $w instead of " . THUMB_SIZE . " (portrait or square source, size {$w}x{$h})"
+		: null;
+}
+
 /** Loads an image and flattens it on white so transparent areas compare fairly. */
 function flattened(string $path): Imagick
 {
@@ -87,13 +123,87 @@ function contentError(string $pathA, string $pathB): ?float
 	return (float) $result[1];
 }
 
+/**
+ * Tells whether the bottom band of a thumbnail is a uniform black area.
+ *
+ * When a source is only partially decoded, the rows that were not read stay at
+ * zero and the resize keeps them black: a cut thumbnail ends with a solid black
+ * band. Normal artwork can also end on black pixels, but a perfectly uniform
+ * band is rare, so this is used as a hint: the thumbnail is then compared with a
+ * freshly generated one before it is reported (see below).
+ *
+ * @param string $path     Path to the thumbnail.
+ * @param float  $fraction Share of the image height to inspect, from the bottom.
+ * @return bool True when that band is solid black.
+ */
+function hasSolidBlackBottom(string $path, float $fraction = 0.35): bool
+{
+	try {
+		$image = new Imagick($path);
+		$image->setIteratorIndex(0);
+		$width = $image->getImageWidth();
+		$height = $image->getImageHeight();
+		if ($width < 1 || $height < 5) {
+			$image->clear();
+			$image->destroy();
+			return false;
+		}
+
+		$bandHeight = max(1, (int) floor($height * $fraction));
+		$image->setImagePage(0, 0, 0, 0);
+		$image->cropImage($width, $bandHeight, 0, $height - $bandHeight);
+		$image->setImagePage(0, 0, 0, 0);
+
+		// Flatten on white so transparent pixels are not mistaken for black.
+		$canvas = new Imagick();
+		$canvas->newImage($width, $bandHeight, new ImagickPixel('white'));
+		$canvas->compositeImage($image, Imagick::COMPOSITE_OVER, 0, 0);
+		$image->clear();
+		$image->destroy();
+
+		$black = true;
+		foreach ([Imagick::CHANNEL_RED, Imagick::CHANNEL_GREEN, Imagick::CHANNEL_BLUE] as $channel) {
+			$channelMean = $canvas->getImageChannelMean($channel);
+			if (!is_array($channelMean) || ($channelMean['mean'] ?? 1.0) > 1.0) {
+				$black = false;
+				break;
+			}
+		}
+		$canvas->clear();
+		$canvas->destroy();
+		return $black;
+	} catch (Throwable $e) {
+		return false;
+	}
+}
+
 $imagickAvailable = extension_loaded('imagick');
 if (!$imagickAvailable) {
 	echo "NOTICE: the Imagick extension is not loaded in this PHP binary.\n"
-		. "        Only the integrity, width and weight checks will run; the content\n"
+		. "        Only the integrity, dimension and weight checks will run; the content\n"
 		. "        comparison and --fix are disabled. Use the PHP binary that has Imagick\n"
 		. "        (the one your web server uses) for the full audit.\n\n";
 	$fix = false;
+} else {
+	// ImageMagick derives each image's time-to-live from the global time limit
+	// (AcquireImage). A finite limit makes a slow decode expire mid-read, which
+	// leaves the rest of the image black and breaks the audit's pixel cache
+	// ("time limit exceeded", "Unable to create new image"). Push it far away;
+	// zero is not unlimited, it makes every new image expire immediately.
+	$longTimeLimit = 100000000; // about three years
+	Imagick::setResourceLimit(Imagick::RESOURCETYPE_TIME, $longTimeLimit);
+	$effectiveTimeLimit = Imagick::getResourceLimit(Imagick::RESOURCETYPE_TIME);
+	if (is_numeric($effectiveTimeLimit) && $effectiveTimeLimit >= 0
+		&& $effectiveTimeLimit < $longTimeLimit) {
+		echo "WARNING: ImageMagick enforces a time limit of {$effectiveTimeLimit} s\n"
+			. "         (set by policy.xml or MAGICK_TIME_LIMIT). Slow decodes are cut\n"
+			. "         mid-image, so the audit is stopped instead of replacing good\n"
+			. "         thumbnails with cut ones.\n"
+			. "         Remove or raise that time limit, then run the audit again.\n"
+			. "         Check it with: identify -list policy | grep -i time\n"
+			. "                        env | grep MAGICK_TIME_LIMIT\n";
+		exit(1);
+	}
 }
 
 $counts = ['checked' => 0, 'bad' => 0, 'fixed' => 0, 'orphans' => 0, 'unregenerable' => 0, 'truncated' => 0];
@@ -165,35 +275,47 @@ foreach ($iterator as $file) {
 	if (!webpIsComplete($thumb)) {
 		$problems[] = 'incomplete or corrupt WebP file';
 	}
-	// 2. Dimensions.
+	// 2. Dimensions: focused side depends on the orientation of the source.
 	if ($info === false) {
 		$problems[] = 'unreadable image';
-	} elseif ($info[0] !== EXPECTED_WIDTH) {
-		$problems[] = 'width ' . $info[0] . ' instead of ' . EXPECTED_WIDTH;
+	} else {
+		$dimensionProblem = dimensionProblem($info, @getimagesize($source));
+		if ($dimensionProblem !== null) {
+			$problems[] = $dimensionProblem;
+		}
 	}
 	// 3. Weight.
 	if ($size < TINY_BYTES) {
 		$problems[] = "very light ($size bytes)";
 	}
 
-	// 4. Content: compare with a fresh thumbnail (always for GIFs, optionally for all).
+	// 4. Shape: a cut thumbnail (partial decode) ends with a solid black band.
+	// This is only a hint, confirmed by the content comparison below; otherwise
+	// artwork that legitimately ends on black would be reported as defective.
+	$blackBottom = $imagickAvailable && $info !== false && hasSolidBlackBottom($thumb);
+	if ($blackBottom) {
+		$problems[] = 'solid black bottom band (possible cut thumbnail)';
+	}
+
+	// 5. Content: compare with a fresh thumbnail (always for GIFs, optionally for all).
 	$isGif = strtolower(pathinfo($source, PATHINFO_EXTENSION)) === 'gif';
-	// Light is only a hint: a simple picture legitimately gives a small thumbnail.
+	// Light and black are only hints: a simple or dark picture is legitimate.
 	$onlyLight = count($problems) === 1 && strpos($problems[0], 'very light') === 0;
+	$onlyBlack = $blackBottom && count($problems) === 1;
 	$fresh = null;
 	if ($imagickAvailable && ($isGif || $allDeep || $problems)) {
 		$fresh = sys_get_temp_dir() . '/audit_' . getmypid() . '.webp';
 		@unlink($fresh);
-		if ((new ThumbImage($source))->createThumb($fresh, EXPECTED_WIDTH) && is_file($fresh)) {
-			if (!$problems || $onlyLight) {
+		if ((new ThumbImage($source))->createThumb($fresh, THUMB_SIZE) && is_file($fresh)) {
+			if (!$problems || $onlyLight || $onlyBlack) {
 				try {
 					$error = contentError($thumb, $fresh);
 					if ($error === null) {
 						$problems[] = 'different size than a fresh thumbnail';
 					} elseif ($error > MAX_CONTENT_ERROR) {
 						$problems[] = sprintf('content differs from a fresh thumbnail (error %.4f)', $error);
-					} elseif ($onlyLight) {
-						$problems = []; // light but identical to a fresh thumbnail: legitimate
+					} elseif ($onlyLight || $onlyBlack) {
+						$problems = []; // legitimate: identical to a fresh thumbnail
 					}
 				} catch (Throwable $e) {
 					$problems[] = 'comparison failed: ' . $e->getMessage();

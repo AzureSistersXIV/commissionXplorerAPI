@@ -4,7 +4,7 @@ const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
 const TRUE_LEVEL = 2;          // what ?isNsfw=true means
 const FILE_INDEX_TTL = 600;
 const ARTWORK_LIST_TTL = 600;
-const THUMBNAIL_WIDTH = 250;      // width in pixels of generated thumbnails
+const THUMBNAIL_SIZE = 250;       // focused side: height for landscape sources, width otherwise
 const THUMBNAIL_MIN_BYTES = 1500; // lighter thumbnails are suspect (possibly cut by an old generator)
 
 require_once "./thumbimage.class.php";
@@ -761,7 +761,8 @@ function webpIsComplete(string $path): bool
  * A thumbnail is regenerated when it is:
  *  - missing, or older than its source file;
  *  - not a complete WebP file (truncated or corrupt);
- *  - not of the expected width (THUMBNAIL_WIDTH);
+ *  - not of the expected size: its focused side (the height for a landscape
+ *    source, the width otherwise) is not THUMBNAIL_SIZE;
  *  - suspiciously light (under THUMBNAIL_MIN_BYTES) AND older than the thumbnail
  *    generator. Such a file may be a leftover cut by an earlier version of
  *    ThumbImage; once regenerated it is newer than the generator, so a picture
@@ -791,8 +792,20 @@ function thumbnailNeedsRegeneration(string $source, string $thumb): bool
     }
 
     $imageInfo = @getimagesize($thumb);
-    if ($imageInfo === false || $imageInfo[0] !== THUMBNAIL_WIDTH) {
+    if ($imageInfo === false || $imageInfo[0] < 1 || $imageInfo[1] < 1) {
         return true;
+    }
+    $sourceInfo = @getimagesize($source);
+    if ($sourceInfo === false || $sourceInfo[0] < 1 || $sourceInfo[1] < 1) {
+        // Unknown source geometry: accept either side being the focused side.
+        if ($imageInfo[0] !== THUMBNAIL_SIZE && $imageInfo[1] !== THUMBNAIL_SIZE) {
+            return true;
+        }
+    } else {
+        $focusedSide = $sourceInfo[0] > $sourceInfo[1] ? $imageInfo[1] : $imageInfo[0];
+        if ($focusedSide !== THUMBNAIL_SIZE) {
+            return true;
+        }
     }
 
     if (filesize($thumb) < THUMBNAIL_MIN_BYTES) {
@@ -855,7 +868,7 @@ function getFullPaths(string $artwork): array
             // Re-check under the lock: another request may have just generated it.
             if (thumbnailNeedsRegeneration("../" . $commPath, "../" . $thumbPath)) {
                 $objThumbImage = new ThumbImage($host . $commPath);
-                if ($objThumbImage->createThumb($destination, THUMBNAIL_WIDTH)) {
+                if ($objThumbImage->createThumb($destination, THUMBNAIL_SIZE)) {
                     invalidateFilesystemCaches();
                 } else {
                     error_log("Thumbnail generation failed for " . $commPath);
