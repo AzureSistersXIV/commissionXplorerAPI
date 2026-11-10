@@ -4,6 +4,9 @@ const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
 const TRUE_LEVEL = 2;          // what ?isNsfw=true means
 const FILE_INDEX_TTL = 600;
 const ARTWORK_LIST_TTL = 600;
+// Bump when the listing's order or shape changes so stale snapshots are ignored
+// instead of being served until the TTL expires.
+const ARTWORK_LIST_FORMAT = 'natural-v1';
 const THUMBNAIL_SIZE = 250;       // focused side: height for landscape sources, width otherwise
 const THUMBNAIL_MIN_BYTES = 1500; // lighter thumbnails are suspect (possibly cut by an old generator)
 
@@ -163,6 +166,27 @@ function collectFiles(string $path, bool $remove = false): array
 }
 
 /**
+ * Compare two repository paths in natural, human order.
+ *
+ * Digit runs compare by value, so "9.jpg" precedes "10.jpg" and the padded
+ * "012.jpg" precedes "13.jpg". strnatcasecmp reports names that differ only by
+ * case or leading zeros as equal, so a byte comparison breaks that tie and
+ * keeps the order total - which is what makes paged listings stable.
+ */
+function compareArtworkPaths(string $a, string $b): int
+{
+    return strnatcasecmp($a, $b) ?: strcmp($a, $b);
+}
+
+/** Recursively list files in natural path order, independent of readdir(). */
+function collectFilesSorted(string $path, bool $remove = false): array
+{
+    $files = collectFiles($path, $remove);
+    usort($files, 'compareArtworkPaths');
+    return $files;
+}
+
+/**
  * Iterate eligible files without materializing a directory's full contents.
  *
  * @return Generator<int, string>
@@ -218,7 +242,7 @@ function iterateFiles(string $path, bool $remove = false): Generator
 function getArtworkListing(string $artist, string $path): array
 {
     $cacheBase = sys_get_temp_dir() . "/commission_artworks_"
-        . sha1(getRepositories()["commissions"] . "\0" . $artist);
+        . sha1(ARTWORK_LIST_FORMAT . "\0" . getRepositories()["commissions"] . "\0" . $artist);
     $listingFile = $cacheBase . ".jsonl";
     $manifestFile = $cacheBase . ".json";
     $lockFile = $cacheBase . ".lock";
@@ -284,7 +308,7 @@ function getArtworkListing(string $artist, string $path): array
 
         try {
             if (is_dir($path)) {
-                foreach (iterateFiles($path) as $file) {
+                foreach (collectFilesSorted($path) as $file) {
                     $line = json_encode($file, JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($output, $line) !== strlen($line)) {
                         throw new RuntimeException("Unable to write artwork listing cache.");

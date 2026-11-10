@@ -12,7 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 header("Access-Control-Allow-Origin: *");
 header('Content-Type: application/json; charset=utf-8');
 
-// Include utility functions (must provide getRepositories() and collectFiles())[cite: 2]
+// Include utility functions (must provide getRepositories() and collectFilesSorted())[cite: 2]
 require_once "./utilitaires.php";
 
 /**
@@ -50,7 +50,9 @@ if (!$hasLimit && $rawCursor !== false) {
 }
 
 if (!$hasLimit) {
-    $files = is_dir($path) ? collectFiles($path) : [];
+    // Natural order, so "9.jpg" and "012.jpg" land before "13.jpg" regardless of
+    // the order the filesystem happens to return them in.
+    $files = is_dir($path) ? collectFilesSorted($path) : [];
     sendJsonResponse($files, array_key_exists('artist', $_GET));
 }
 

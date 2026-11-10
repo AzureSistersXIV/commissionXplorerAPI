@@ -90,11 +90,14 @@ Content-Type: application/json
 ```
 
 The endpoint returns the artist's commission file paths. It requires a known,
-non-empty artist name.
+non-empty artist name. Paths come back in natural order rather than filesystem
+order: numbers compare by value, so `9.jpg` precedes `10.jpg` and `012.jpg`
+precedes `13.jpg`, and subdirectories sort as a group among their siblings.
 
 For large collections, request an optional page with `limit` (1–500). The first
-paginated request builds a streamed, temporary listing snapshot; later pages
-seek directly to a byte offset instead of rescanning all previous entries.
+paginated request builds a temporary listing snapshot; later pages seek directly
+to a byte offset instead of rescanning all previous entries. Pages follow the
+same natural order as the unpaged response.
 Continue using the returned opaque `nextCursor` with the same artist and limit:
 
 ```http
