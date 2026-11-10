@@ -87,7 +87,16 @@ function contentError(string $pathA, string $pathB): ?float
 	return (float) $result[1];
 }
 
-$counts = ['checked' => 0, 'bad' => 0, 'fixed' => 0, 'orphans' => 0, 'unregenerable' => 0];
+$imagickAvailable = extension_loaded('imagick');
+if (!$imagickAvailable) {
+	echo "NOTICE: the Imagick extension is not loaded in this PHP binary.\n"
+		. "        Only the integrity, width and weight checks will run; the content\n"
+		. "        comparison and --fix are disabled. Use the PHP binary that has Imagick\n"
+		. "        (the one your web server uses) for the full audit.\n\n";
+	$fix = false;
+}
+
+$counts = ['checked' => 0, 'bad' => 0, 'fixed' => 0, 'orphans' => 0, 'unregenerable' => 0, 'truncated' => 0];
 $iterator = new RecursiveIteratorIterator(
 	new RecursiveDirectoryIterator($thumbsDir, FilesystemIterator::SKIP_DOTS)
 );
@@ -104,8 +113,49 @@ foreach ($iterator as $file) {
 
 	if (!is_file($source)) {
 		$counts['orphans']++;
-		echo "ORPHAN   $relative (source missing)\n";
+		// Old naming scheme? A thumbnail "name.webp" next to a source "name.<ext>"
+		// is never used: the app looks for "name.<ext>.webp".
+		$stem = substr(basename($thumb), 0, -5);
+		$sourceDir = dirname($source);
+		$similar = null;
+		if (is_dir($sourceDir)) {
+			foreach (scandir($sourceDir) as $candidate) {
+				if ($candidate !== '.' && $candidate !== '..'
+					&& pathinfo($candidate, PATHINFO_FILENAME) === $stem
+					&& is_file($sourceDir . '/' . $candidate)) {
+					$similar = $candidate;
+					break;
+				}
+			}
+		}
+		if ($similar !== null) {
+			echo "ORPHAN   $relative (old naming scheme: source exists as \"$similar\", "
+				. "the app expects \"$similar.webp\")\n";
+		} else {
+			echo "ORPHAN   $relative (source missing)\n";
+		}
 		continue;
+	}
+
+	// A GIF source that does not end with the GIF trailer byte (";") is incomplete.
+	// A thumbnail of it is consistent with the file but shows only part of the picture,
+	// and the comparison with a fresh thumbnail cannot detect that.
+	if (strtolower(pathinfo($source, PATHINFO_EXTENSION)) === 'gif' && filesize($source) > 0) {
+		$sourceHandle = fopen($source, 'rb');
+		if ($sourceHandle !== false) {
+			fseek($sourceHandle, -1, SEEK_END);
+			$lastByte = fread($sourceHandle, 1);
+			fclose($sourceHandle);
+			if ($lastByte !== ';') {
+				$counts['truncated']++;
+				$sourceSize = filesize($source);
+				$note = $sourceSize % 1048576 === 0
+					? sprintf(' - exactly %d MiB, typical of an upload or transfer size limit', $sourceSize / 1048576)
+					: '';
+				echo "SOURCE   " . substr($relative, 0, -5)
+					. " (GIF without its end byte: the source file is probably truncated, $sourceSize bytes$note)\n";
+			}
+		}
 	}
 
 	$problems = [];
@@ -128,18 +178,22 @@ foreach ($iterator as $file) {
 
 	// 4. Content: compare with a fresh thumbnail (always for GIFs, optionally for all).
 	$isGif = strtolower(pathinfo($source, PATHINFO_EXTENSION)) === 'gif';
+	// Light is only a hint: a simple picture legitimately gives a small thumbnail.
+	$onlyLight = count($problems) === 1 && strpos($problems[0], 'very light') === 0;
 	$fresh = null;
-	if ($isGif || $allDeep || $problems) {
+	if ($imagickAvailable && ($isGif || $allDeep || $problems)) {
 		$fresh = sys_get_temp_dir() . '/audit_' . getmypid() . '.webp';
 		@unlink($fresh);
 		if ((new ThumbImage($source))->createThumb($fresh, EXPECTED_WIDTH) && is_file($fresh)) {
-			if (!$problems) {
+			if (!$problems || $onlyLight) {
 				try {
 					$error = contentError($thumb, $fresh);
 					if ($error === null) {
 						$problems[] = 'different size than a fresh thumbnail';
 					} elseif ($error > MAX_CONTENT_ERROR) {
 						$problems[] = sprintf('content differs from a fresh thumbnail (error %.4f)', $error);
+					} elseif ($onlyLight) {
+						$problems = []; // light but identical to a fresh thumbnail: legitimate
 					}
 				} catch (Throwable $e) {
 					$problems[] = 'comparison failed: ' . $e->getMessage();
@@ -165,13 +219,14 @@ foreach ($iterator as $file) {
 	$counts['bad']++;
 	echo "BAD      $relative ($size bytes): " . implode('; ', $problems) . "\n";
 	if ($fix && $fresh !== null) {
-		// Copy next to the target first so the final rename stays atomic.
-		$staging = $thumb . '.fix.' . getmypid() . '.tmp';
-		if (copy($fresh, $staging) && rename($staging, $thumb)) {
+		// Overwrite the existing file IN PLACE (no rename of a new file): the owner,
+		// permissions and ACL of the thumbnail are preserved. This matters when the
+		// audit runs as root on a NAS where the web server user must keep read access.
+		// The new content is verified as a complete WebP before it is copied.
+		if (webpIsComplete($fresh) && copy($fresh, $thumb)) {
 			$counts['fixed']++;
 			echo "         -> replaced by a fresh thumbnail (" . filesize($thumb) . " bytes)\n";
 		} else {
-			@unlink($staging);
 			echo "         -> replacement FAILED\n";
 		}
 	}
@@ -180,8 +235,12 @@ foreach ($iterator as $file) {
 	}
 }
 
-echo "\nChecked: {$counts['checked']}, defective: {$counts['bad']}, repaired: {$counts['fixed']}, "
+echo "\nTruncated GIF sources: {$counts['truncated']}\n";
+echo "Checked: {$counts['checked']}, defective: {$counts['bad']}, repaired: {$counts['fixed']}, "
 	. "orphans: {$counts['orphans']}, not regenerable: {$counts['unregenerable']}\n";
-if ($counts['bad'] > 0 && !$fix) {
+if (!$imagickAvailable) {
+	echo "Content checks were NOT run (no Imagick): thumbnails of normal size but cut are not detected.\n";
+}
+if ($counts['bad'] > 0 && !$fix && $imagickAvailable) {
 	echo "Run again with --fix to replace the defective thumbnails.\n";
 }
