@@ -48,7 +48,12 @@ function assertTrue(bool $condition, string $message): void
     }
 }
 
-function requestApi(string $path, string $method = 'GET', ?array $json = null): array
+function requestApi(
+    string $path,
+    string $method = 'GET',
+    ?array $json = null,
+    array $headers = []
+): array
 {
     global $server;
     if ($server === null) {
@@ -64,9 +69,16 @@ function requestApi(string $path, string $method = 'GET', ?array $json = null): 
         ],
     ];
 
+    $requestHeaders = [];
     if ($json !== null) {
-        $options['http']['header'] = "Content-Type: application/json\r\n";
+        $requestHeaders[] = "Content-Type: application/json";
         $options['http']['content'] = json_encode($json, JSON_THROW_ON_ERROR);
+    }
+    foreach ($headers as $name => $value) {
+        $requestHeaders[] = $name . ': ' . $value;
+    }
+    if ($requestHeaders !== []) {
+        $options['http']['header'] = implode("\r\n", $requestHeaders) . "\r\n";
     }
 
     $body = file_get_contents($url, false, stream_context_create($options));
@@ -75,13 +87,16 @@ function requestApi(string $path, string $method = 'GET', ?array $json = null): 
     }
 
     $status = 0;
+    $responseHeaders = [];
     foreach ($http_response_header as $header) {
         if (preg_match('/^HTTP\/\S+ (\d{3})/', $header, $matches)) {
             $status = (int)$matches[1];
+        } elseif (preg_match('/^([^:]+):\s*(.*)$/', $header, $matches)) {
+            $responseHeaders[strtolower($matches[1])] = $matches[2];
         }
     }
 
-    return [$status, $body];
+    return [$status, $body, $responseHeaders];
 }
 
 function timedRequestApi(string $path, string $method = 'GET', ?array $json = null): array
@@ -113,6 +128,16 @@ function clearFileIndexCache(): void
     global $cacheRoot;
     foreach (glob($cacheRoot . '/commission_file_index_*.json') ?: [] as $cacheFile) {
         unlink($cacheFile);
+    }
+}
+
+function clearArtworkListingCache(): void
+{
+    global $cacheRoot;
+    foreach (glob($cacheRoot . '/commission_artworks_*') ?: [] as $cacheFile) {
+        if (is_file($cacheFile)) {
+            unlink($cacheFile);
+        }
     }
 }
 
@@ -344,9 +369,16 @@ function runTests(): void
     ], JSON_THROW_ON_ERROR));
 
     clearArtistCache();
-    [, $body] = requestApi('artists.php?isNsfw=0');
+    [$status, $body, $responseHeaders] = requestApi('artists.php?isNsfw=0');
+    assertSameValue(200, $status, 'artists.php returns success with a cache validator');
+    assertTrue(isset($responseHeaders['etag']), 'artists.php returns an ETag');
     $artistCacheFiles = glob($GLOBALS['cacheRoot'] . '/artist_thumbs_*.json') ?: [];
     assertSameValue(1, count($artistCacheFiles), 'artists.php stores its response cache');
+    [$status, $body] = requestApi('artists.php?isNsfw=0', 'GET', null, [
+        'If-None-Match' => $responseHeaders['etag'],
+    ]);
+    assertSameValue(304, $status, 'artists.php honors If-None-Match');
+    assertSameValue('', $body, 'artists.php sends no body for a matching ETag');
     [$status, $body] = requestApi('artworks.php', 'GET', ['artist' => 'Level0']);
     assertSameValue(200, $status, 'artworks.php accepts a GET JSON body');
     assertTrue(is_file($artistCacheFiles[0]), 'artworks.php does not evict unrelated artist response caches');
@@ -358,6 +390,16 @@ function runTests(): void
     assertSameValue(1, count($firstPage['items']), 'artworks.php limits the first page');
     assertSameValue(true, $firstPage['hasMore'], 'artworks.php reports when another page exists');
     assertTrue(is_string($firstPage['nextCursor']), 'artworks.php returns a cursor for the next page');
+    [$status, $body, $responseHeaders] = requestApi(
+        'artworks.php?artist=Level1&limit=1',
+        'GET'
+    );
+    assertSameValue(200, $status, 'artworks.php accepts a query-string artist for cacheable GET requests');
+    assertTrue(isset($responseHeaders['etag']), 'artworks.php returns an ETag for query-string requests');
+    [$status] = requestApi('artworks.php?artist=Level1&limit=1', 'GET', null, [
+        'If-None-Match' => $responseHeaders['etag'],
+    ]);
+    assertSameValue(304, $status, 'artworks.php honors If-None-Match for query-string requests');
     [$status, $body] = requestApi(
         'artworks.php?limit=1&cursor=' . rawurlencode($firstPage['nextCursor']),
         'GET',
@@ -477,6 +519,16 @@ function runTests(): void
     assertSameValue(1.0, (float)$allProgress['Level0'], 'all-progress includes complete artists');
     assertSameValue(0.5, (float)$allProgress['Level1'], 'all-progress includes partial artists');
     assertSameValue(0.0, (float)$allProgress['EmptyArtist'], 'all-progress handles artists with no commissions');
+    foreach (['last.php', 'stats.php', 'showAllProgress.php'] as $cacheableEndpoint) {
+        [$status, , $responseHeaders] = requestApi($cacheableEndpoint);
+        assertSameValue(200, $status, $cacheableEndpoint . ' returns success with a cache validator');
+        assertTrue(isset($responseHeaders['etag']), $cacheableEndpoint . ' returns an ETag');
+        [$status, $body] = requestApi($cacheableEndpoint, 'GET', null, [
+            'If-None-Match' => $responseHeaders['etag'],
+        ]);
+        assertSameValue(304, $status, $cacheableEndpoint . ' honors If-None-Match');
+        assertSameValue('', $body, $cacheableEndpoint . ' omits its body when unchanged');
+    }
     file_put_contents($apiRoot . '/levels.json', 'not json');
     [$status, $body] = requestApi('showAllProgress.php');
     assertSameValue(200, $status, 'showAllProgress.php accepts invalid artist configuration');
@@ -496,6 +548,46 @@ function runProfileTests(string $profile): void
 
     if ($profile === 'all' || $profile === 'performance') {
         clearFileIndexCache();
+        clearArtworkListingCache();
+        global $apiRoot, $commissionsRoot;
+        $levelsFile = $apiRoot . '/levels.json';
+        $artists = json_decode((string)file_get_contents($levelsFile), true);
+        $artists['PerfFixture'] = 1;
+        file_put_contents($levelsFile, json_encode($artists, JSON_THROW_ON_ERROR));
+        $performanceDirectory = $commissionsRoot . '/PerfFixture';
+        makeDirectory($performanceDirectory);
+        for ($i = 0; $i < 5000; $i++) {
+            file_put_contents($performanceDirectory . '/artwork-' . str_pad((string)$i, 5, '0', STR_PAD_LEFT) . '.jpg', '');
+        }
+
+        [$firstStatus, $firstBody, $listingBuildMs] = timedRequestApi('artworks.php?artist=PerfFixture&limit=100');
+        assertSameValue(200, $firstStatus, 'large artwork listing builds successfully');
+        $page = jsonResponse($firstBody);
+        assertSameValue(100, count($page['items']), 'large listing first page is bounded');
+        $listedCount = count($page['items']);
+        $deepPageMs = 0.0;
+        while ($page['hasMore']) {
+            [$pageStatus, $pageBody, $deepPageMs] = timedRequestApi(
+                'artworks.php?artist=PerfFixture&limit=100&cursor=' . rawurlencode($page['nextCursor'])
+            );
+            assertSameValue(200, $pageStatus, 'large listing cursor page succeeds');
+            $page = jsonResponse($pageBody);
+            $listedCount += count($page['items']);
+        }
+        assertSameValue(5000, $listedCount, 'large listing pages cover the full fixture without omissions');
+        assertTrue($listingBuildMs < 5000, 'cold 5,000-file listing snapshot completes within 5 seconds');
+        assertTrue($deepPageMs < 1000, 'deep cached page is served within 1 second');
+        fwrite(STDOUT, sprintf(
+            "Artwork listing: 5,000 files; snapshot %.2f ms; final page %.2f ms\n",
+            $listingBuildMs,
+            $deepPageMs
+        ));
+        removeTree($performanceDirectory);
+        unset($artists['PerfFixture']);
+        file_put_contents($levelsFile, json_encode($artists, JSON_THROW_ON_ERROR));
+        clearArtworkListingCache();
+        clearFileIndexCache();
+
         [$coldStatus, $coldBody, $coldMs] = timedRequestApi('showAllProgress.php');
         assertSameValue(200, $coldStatus, 'cold progress request succeeds');
         assertTrue(is_array(jsonResponse($coldBody)), 'cold progress response remains valid JSON');

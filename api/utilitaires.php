@@ -3,6 +3,7 @@
 const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
 const TRUE_LEVEL = 2;          // what ?isNsfw=true means
 const FILE_INDEX_TTL = 600;
+const ARTWORK_LIST_TTL = 600;
 
 require_once "./thumbimage.class.php";
 
@@ -112,97 +113,294 @@ function getRepositories(): array
     return $repos ??= json_decode(file_get_contents("api.json"), true);
 }
 
+/**
+ * Emit a JSON response with a content-derived validator for GET requests.
+ */
+function sendJsonResponse(mixed $value, bool $allowConditional = true): never
+{
+    $json = json_encode($value, JSON_THROW_ON_ERROR);
+    sendJsonBody($json, $allowConditional);
+}
+
+/**
+ * Emit an already-encoded JSON body with a content-derived validator.
+ */
+function sendJsonBody(string $json, bool $allowConditional = true): never
+{
+    $etag = '"' . hash("sha256", $json) . '"';
+    header("ETag: " . $etag);
+    header("Cache-Control: private, max-age=0, must-revalidate");
+
+    $method = $_SERVER['REQUEST_METHOD'] ?? '';
+    $ifNoneMatch = $_SERVER['HTTP_IF_NONE_MATCH'] ?? '';
+    if (
+        $allowConditional
+        && in_array($method, ['GET', 'HEAD'], true)
+        && $ifNoneMatch !== ''
+    ) {
+        foreach (array_map('trim', explode(',', $ifNoneMatch)) as $candidate) {
+            if ($candidate === '*' || preg_replace('/^W\//', '', $candidate) === $etag) {
+                http_response_code(304);
+                exit;
+            }
+        }
+    }
+
+    echo $json;
+    exit;
+}
+
 /** Recursively list files. No sorting, no config reads. */
 function collectFiles(string $path, bool $remove = false): array
 {
-    global $toIgnore;
-
-    $entries = @scandir($path);
-    if ($entries === false) {
-        return [];
-    }
-
-    $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
     $out = [];
-
-    foreach ($entries as $entry) {
-        if ($entry === "." || $entry === "..") continue;
-        $full = $path . "/" . $entry;
-
-        // Junk entries: delete if asked, always skip otherwise
-        if (in_array($entry, $toRemove, true)) {
-            if ($remove) {
-                is_dir($full)
-                    ? system('rm -rf -- ' . escapeshellarg($full))
-                    : unlink($full);
-            }
-            continue;
-        }
-
-        if (is_dir($full)) {
-            array_push($out, ...collectFiles($full, $remove));
-            continue;
-        }
-
-        $ext = pathinfo($entry, PATHINFO_EXTENSION);
-        if ($ext !== "" && !in_array($ext, $toIgnore, true)) {
-            $out[] = $full;
-        }
+    foreach (iterateFiles($path, $remove) as $file) {
+        $out[] = $file;
     }
-
     return $out;
 }
 
 /**
- * Collect a bounded page of files while traversing in scandir order.
+ * Iterate eligible files without materializing a directory's full contents.
  *
- * @return list<string>
+ * @return Generator<int, string>
  */
-function collectFilesPage(string $path, int $offset, int $limit): array
+function iterateFiles(string $path, bool $remove = false): Generator
 {
-    $files = [];
-    $skipped = 0;
-    $collect = function (string $directory) use (&$collect, &$files, &$skipped, $offset, $limit): bool {
-        global $toIgnore;
+    global $toIgnore;
 
-        $entries = @scandir($directory);
-        if ($entries === false) {
-            return false;
-        }
+    $directory = @opendir($path);
+    if ($directory === false) {
+        return;
+    }
 
-        $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === ".." || in_array($entry, $toRemove, true)) {
+    $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
+    try {
+        while (($entry = readdir($directory)) !== false) {
+            if ($entry === "." || $entry === "..") {
                 continue;
             }
 
-            $fullPath = $directory . "/" . $entry;
-            if (is_dir($fullPath)) {
-                if ($collect($fullPath)) {
-                    return true;
+            $fullPath = $path . "/" . $entry;
+            if (in_array($entry, $toRemove, true)) {
+                if ($remove) {
+                    if (is_dir($fullPath)) {
+                        system('rm -rf -- ' . escapeshellarg($fullPath));
+                    } else {
+                        unlink($fullPath);
+                    }
                 }
                 continue;
             }
 
-            $extension = pathinfo($entry, PATHINFO_EXTENSION);
-            if ($extension === "" || in_array($extension, $toIgnore, true)) {
-                continue;
-            }
-            if ($skipped < $offset) {
-                $skipped++;
+            if (is_dir($fullPath)) {
+                yield from iterateFiles($fullPath, $remove);
                 continue;
             }
 
-            $files[] = $fullPath;
-            if (count($files) >= $limit) {
-                return true;
+            $extension = pathinfo($entry, PATHINFO_EXTENSION);
+            if ($extension !== "" && !in_array($extension, $toIgnore, true)) {
+                yield $fullPath;
             }
         }
-        return false;
+    } finally {
+        closedir($directory);
+    }
+}
+
+/**
+ * Ensure an on-disk, newline-delimited listing snapshot exists for an artist.
+ *
+ * @return array{file: string, manifest: string, lock: string, version: string}
+ */
+function getArtworkListing(string $artist, string $path): array
+{
+    $cacheBase = sys_get_temp_dir() . "/commission_artworks_"
+        . sha1(getRepositories()["commissions"] . "\0" . $artist);
+    $listingFile = $cacheBase . ".jsonl";
+    $manifestFile = $cacheBase . ".json";
+    $lockFile = $cacheBase . ".lock";
+    $lock = @fopen($lockFile, "c");
+    if ($lock === false) {
+        throw new RuntimeException("Unable to lock artwork listing cache.");
+    }
+
+    $readFreshManifest = static function () use ($manifestFile, $listingFile): ?array {
+        $manifest = is_file($manifestFile)
+            ? json_decode((string)file_get_contents($manifestFile), true)
+            : null;
+        if (
+            !is_array($manifest)
+            || !is_file($listingFile)
+            || !isset($manifest["created_at"], $manifest["version"])
+            || !is_int($manifest["created_at"])
+            || !is_string($manifest["version"])
+            || time() - $manifest["created_at"] >= ARTWORK_LIST_TTL
+        ) {
+            return null;
+        }
+        return $manifest;
     };
 
-    $collect($path);
-    return $files;
+    $lockHeld = false;
+    try {
+        if (!flock($lock, LOCK_SH)) {
+            throw new RuntimeException("Unable to read artwork listing cache.");
+        }
+        $lockHeld = true;
+        $manifest = $readFreshManifest();
+        if ($manifest !== null) {
+            return [
+                'file' => $listingFile,
+                'manifest' => $manifestFile,
+                'lock' => $lockFile,
+                'version' => $manifest["version"],
+            ];
+        }
+
+        flock($lock, LOCK_UN);
+        $lockHeld = false;
+        if (!flock($lock, LOCK_EX)) {
+            throw new RuntimeException("Unable to refresh artwork listing cache.");
+        }
+        $lockHeld = true;
+        $manifest = $readFreshManifest();
+        if ($manifest !== null) {
+            return [
+                'file' => $listingFile,
+                'manifest' => $manifestFile,
+                'lock' => $lockFile,
+                'version' => $manifest["version"],
+            ];
+        }
+
+        $temporaryListing = $listingFile . "." . getmypid() . ".tmp";
+        $output = @fopen($temporaryListing, "wb");
+        if ($output === false) {
+            throw new RuntimeException("Unable to create artwork listing cache.");
+        }
+
+        try {
+            if (is_dir($path)) {
+                foreach (iterateFiles($path) as $file) {
+                    $line = json_encode($file, JSON_THROW_ON_ERROR) . "\n";
+                    if (fwrite($output, $line) !== strlen($line)) {
+                        throw new RuntimeException("Unable to write artwork listing cache.");
+                    }
+                }
+            }
+        } catch (Throwable $exception) {
+            @unlink($temporaryListing);
+            throw $exception;
+        } finally {
+            fclose($output);
+        }
+
+        if (is_file($manifestFile) && !unlink($manifestFile)) {
+            @unlink($temporaryListing);
+            throw new RuntimeException("Unable to invalidate stale artwork listing metadata.");
+        }
+        if (!rename($temporaryListing, $listingFile)) {
+            @unlink($temporaryListing);
+            throw new RuntimeException("Unable to publish artwork listing cache.");
+        }
+
+        $manifest = [
+            "created_at" => time(),
+            "version" => bin2hex(random_bytes(16)),
+        ];
+        $temporaryManifest = $manifestFile . "." . getmypid() . ".tmp";
+        $manifestJson = json_encode($manifest, JSON_THROW_ON_ERROR);
+        if (
+            file_put_contents($temporaryManifest, $manifestJson, LOCK_EX) === false
+            || !rename($temporaryManifest, $manifestFile)
+        ) {
+            @unlink($temporaryManifest);
+            throw new RuntimeException("Unable to publish artwork listing metadata.");
+        }
+
+        return [
+            'file' => $listingFile,
+            'manifest' => $manifestFile,
+            'lock' => $lockFile,
+            'version' => $manifest["version"],
+        ];
+    } finally {
+        if ($lockHeld) {
+            flock($lock, LOCK_UN);
+        }
+        fclose($lock);
+    }
+}
+
+/**
+ * Read a bounded page from an indexed listing snapshot using a byte-offset cursor.
+ *
+ * @return array{items: list<string>, next_offset: ?int}
+ */
+function readArtworkListingPage(
+    string $listingFile,
+    string $manifestFile,
+    string $lockFile,
+    string $version,
+    int $offset,
+    int $limit
+): array
+{
+    $lock = @fopen($lockFile, "c");
+    if ($lock === false || !flock($lock, LOCK_SH)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        throw new RuntimeException("Unable to read artwork listing snapshot.");
+    }
+
+    $input = @fopen($listingFile, "rb");
+    if ($input === false) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        throw new RuntimeException("Unable to read artwork listing cache.");
+    }
+
+    try {
+        $manifest = json_decode((string)file_get_contents($manifestFile), true);
+        if (!is_array($manifest) || ($manifest["version"] ?? null) !== $version) {
+            throw new InvalidArgumentException("Artwork listing snapshot has expired.");
+        }
+        $fileStat = fstat($input);
+        if ($fileStat === false || $offset > $fileStat['size']) {
+            throw new InvalidArgumentException("Invalid artwork listing cursor offset.");
+        }
+        if (fseek($input, $offset) !== 0) {
+            throw new InvalidArgumentException("Invalid artwork listing cursor offset.");
+        }
+        if ($offset > 0) {
+            fseek($input, $offset - 1);
+            if (fgetc($input) !== "\n" || fseek($input, $offset) !== 0) {
+                throw new InvalidArgumentException("Invalid artwork listing cursor offset.");
+            }
+        }
+
+        $items = [];
+        $nextOffset = null;
+        while (($lineOffset = ftell($input)) !== false && ($line = fgets($input)) !== false) {
+            $file = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            if (!is_string($file)) {
+                throw new RuntimeException("Invalid artwork listing cache entry.");
+            }
+            if (count($items) === $limit) {
+                $nextOffset = $lineOffset;
+                break;
+            }
+            $items[] = $file;
+        }
+
+        return ['items' => $items, 'next_offset' => $nextOffset];
+    } finally {
+        fclose($input);
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
 }
 
 /** Map a thumbnail path to its original commission file's mtime. */

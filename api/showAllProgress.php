@@ -9,4 +9,4 @@ require_once "./utilitaires.php";
 
 $percentages = verifyPercentage();
 
-echo json_encode($percentages);
+sendJsonResponse($percentages);

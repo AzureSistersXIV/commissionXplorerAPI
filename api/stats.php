@@ -53,4 +53,4 @@ $stats = [
 	"nsfw" => $nsfw
 ];
 
-echo json_encode($stats);
+sendJsonResponse($stats);

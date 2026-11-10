@@ -92,8 +92,10 @@ Content-Type: application/json
 The endpoint returns the artist's commission file paths. It requires a known,
 non-empty artist name.
 
-For large collections, request an optional page with `limit` (1–500). Continue
-using the returned opaque `nextCursor` with the same artist and limit:
+For large collections, request an optional page with `limit` (1–500). The first
+paginated request builds a streamed, temporary listing snapshot; later pages
+seek directly to a byte offset instead of rescanning all previous entries.
+Continue using the returned opaque `nextCursor` with the same artist and limit:
 
 ```http
 GET /artworks.php?limit=50
@@ -103,9 +105,14 @@ Content-Type: application/json
 ```
 
 Paginated responses have the shape `{"items":[...],"nextCursor":"...","hasMore":true}`.
-The cursor is `null` on the final page. If `limit` is omitted, the endpoint
-retains its legacy response shape: a full array of paths. A cursor without a
-limit or a malformed cursor returns HTTP 400.
+The cursor is `null` on the final page and is tied to its artist and listing
+snapshot; restart pagination if the snapshot expires. If `limit` is omitted,
+the endpoint retains its legacy response shape: a full array of paths. A
+cursor without a limit or a malformed cursor returns HTTP 400.
+
+Cacheable GET endpoints return an `ETag` and honor `If-None-Match` with HTTP
+304 when the response has not changed. For artwork requests, use the `artist`
+query parameter (rather than a GET body) to enable conditional caching.
 
 | Input case | Result |
 | --- | --- |
@@ -228,7 +235,8 @@ Run a single profile by passing its name:
 Each profile runs the base API regression suite and its own additional checks:
 
 - **Performance** measures cold and warm all-artist progress responses and
-  enforces response-time ceilings.
+  paginates a synthetic 5,000-file artwork collection, reporting snapshot and
+  deep-page response times.
 - **SIT** checks HTTP communication between API endpoints and repository data.
 - **UAT** checks the artist browsing, artwork listing, and progress user flows.
 - **QA** checks representative response status, shape, and backward-compatible

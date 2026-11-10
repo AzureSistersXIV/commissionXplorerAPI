@@ -30,8 +30,10 @@ if (
     && time() - filemtime($cacheFile) < CACHE_TTL
     && filemtime($cacheFile) >= filemtime("levels.json")
 ) {
-    readfile($cacheFile);
-    exit;
+    $cachedJson = file_get_contents($cacheFile);
+    if ($cachedJson !== false) {
+        sendJsonBody($cachedJson);
+    }
 }
 
 // Load artists data from JSON file
@@ -67,4 +69,4 @@ if (file_put_contents($tmp, $json, LOCK_EX) !== false) {
     rename($tmp, $cacheFile);
 }
 
-echo $json;
+sendJsonBody($json);

@@ -54,4 +54,4 @@ uasort($artists, function ($a, $b) {
 });
 
 // Output the artists array as a JSON response
-echo json_encode($artists);
+sendJsonResponse($artists);

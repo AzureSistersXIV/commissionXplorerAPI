@@ -27,7 +27,7 @@ function fail(int $status, string $message): never
 
 // Get the 'artist' parameter from the request.[cite: 2]
 // Compare against "" explicitly so an artist named "0" is not treated as missing.[cite: 2]
-$artist = getFormParameter("artist");
+$artist = $_GET['artist'] ?? getFormParameter("artist");
 if (!is_string($artist) || $artist === "") {
     fail(400, 'Artist not provided');
 }
@@ -51,8 +51,7 @@ if (!$hasLimit && $rawCursor !== false) {
 
 if (!$hasLimit) {
     $files = is_dir($path) ? collectFiles($path) : [];
-    echo json_encode($files);
-    exit;
+    sendJsonResponse($files, array_key_exists('artist', $_GET));
 }
 
 if (
@@ -68,6 +67,7 @@ if ($limit > 500) {
 }
 
 $offset = 0;
+$listing = getArtworkListing($artist, $path);
 if ($rawCursor !== false && $rawCursor !== '') {
     if (!is_string($rawCursor)) {
         fail(400, 'Invalid cursor');
@@ -80,6 +80,7 @@ if ($rawCursor !== false && $rawCursor !== '') {
     if (
         !is_array($cursor)
         || ($cursor['artist'] ?? null) !== $artist
+        || ($cursor['version'] ?? null) !== $listing['version']
         || !isset($cursor['offset'])
         || !is_int($cursor['offset'])
         || $cursor['offset'] < 0
@@ -92,18 +93,28 @@ if ($rawCursor !== false && $rawCursor !== '') {
     $offset = $cursor['offset'];
 }
 
-$files = is_dir($path) ? collectFilesPage($path, $offset, $limit + 1) : [];
-$hasMore = count($files) > $limit;
-$items = array_slice($files, 0, $limit);
-$nextCursor = $hasMore
+try {
+    $page = readArtworkListingPage(
+        $listing['file'],
+        $listing['manifest'],
+        $listing['lock'],
+        $listing['version'],
+        $offset,
+        $limit
+    );
+} catch (InvalidArgumentException $exception) {
+    fail(400, 'Invalid cursor offset');
+}
+$nextCursor = $page['next_offset'] !== null
     ? rtrim(strtr(base64_encode(json_encode([
         'artist' => $artist,
-        'offset' => $offset + $limit,
+        'version' => $listing['version'],
+        'offset' => $page['next_offset'],
     ], JSON_THROW_ON_ERROR)), '+/', '-_'), '=')
     : null;
 
-echo json_encode([
-    'items' => $items,
+sendJsonResponse([
+    'items' => $page['items'],
     'nextCursor' => $nextCursor,
-    'hasMore' => $hasMore,
-]);
+    'hasMore' => $page['next_offset'] !== null,
+], array_key_exists('artist', $_GET));

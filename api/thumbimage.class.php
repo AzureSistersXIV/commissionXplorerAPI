@@ -32,7 +32,7 @@ class ThumbImage
 	 * @return bool True if thumbnail created successfully, false otherwise.
 	 */
     public function createThumb($destImagePath, $thumbWidth=100)
-    {		
+    {
 		if (empty($this->source) || !file_exists($this->source)) {
 			return false;
 		}
@@ -41,18 +41,47 @@ class ThumbImage
 			return false;
 		}
 		
-		try{
+		$temporaryPath = $destImagePath . "." . getmypid() . "." . bin2hex(random_bytes(6)) . ".tmp";
+		$thumb = null;
+		try {
+			$resourceLimits = [
+				Imagick::RESOURCETYPE_MEMORY => 128 * 1024 * 1024,
+				Imagick::RESOURCETYPE_MAP => 256 * 1024 * 1024,
+				Imagick::RESOURCETYPE_DISK => 512 * 1024 * 1024,
+				Imagick::RESOURCETYPE_TIME => 30,
+				Imagick::RESOURCETYPE_THREAD => 1,
+				Imagick::RESOURCETYPE_WIDTH => 100000,
+				Imagick::RESOURCETYPE_HEIGHT => 100000,
+			];
+			foreach ($resourceLimits as $resource => $limit) {
+				if (!Imagick::setResourceLimit($resource, $limit)) {
+					throw new RuntimeException("Unable to set an Imagick resource limit.");
+				}
+			}
 
-			$thumb = new Imagick($this->source);
+			$thumb = new Imagick();
+			$thumb->readImage($this->source);
+			$thumb->setIteratorIndex(0);
 			$thumb->setImageCompressionQuality(75);
-			$thumb->resizeImage($thumbWidth, 0, Imagick::FILTER_LANCZOS,1);
-			$thumb->writeImage($destImagePath);
-			$thumb->destroy();
-			
+			$thumb->thumbnailImage($thumbWidth, 0);
+			$thumb->setImageFormat('webp');
+			$thumb->writeImage($temporaryPath);
+			if (!rename($temporaryPath, $destImagePath)) {
+				throw new RuntimeException("Unable to publish generated thumbnail.");
+			}
+
 			return true;
-		}catch(Exception $e){
+		} catch (Throwable $e) {
 			error_log("Thumbnail creation failed: " . $e->getMessage());
 			return false;
+		} finally {
+			if ($thumb instanceof Imagick) {
+				$thumb->clear();
+				$thumb->destroy();
+			}
+			if (is_file($temporaryPath)) {
+				unlink($temporaryPath);
+			}
 		}
     }
 }
