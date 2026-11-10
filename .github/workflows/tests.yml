@@ -38,29 +38,50 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          log_file="test-${{ matrix.profile }}.log"
           printf 'API test profile: %s\nRun: %s\nCommit: %s\n\n' \
-            "${{ matrix.profile }}" "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee test.log
-          sh ./run-tests.sh "${{ matrix.profile }}" 2>&1 | tee -a test.log
+            "${{ matrix.profile }}" "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee "$log_file"
+          sh ./run-tests.sh "${{ matrix.profile }}" 2>&1 | tee -a "$log_file"
+          test_status=${PIPESTATUS[0]}
+          if [ "$test_status" -eq 0 ]; then
+            echo "Result: PASSED" | tee -a "$log_file"
+          else
+            echo "Result: FAILED (exit code $test_status)" | tee -a "$log_file"
+          fi
+          exit "$test_status"
 
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: api-test-log-${{ matrix.profile }}-${{ github.run_id }}
-          path: test.log
+          path: test-${{ matrix.profile }}.log
           if-no-files-found: warn
           retention-days: 30
 
+  notify:
+    runs-on: ubuntu-24.04
+    needs: test
+    if: always()
+    steps:
+      - name: Download test logs
+        if: always()
+        uses: actions/download-artifact@v5
+        with:
+          pattern: api-test-log-*-${{ github.run_id }}
+          path: test-logs
+          merge-multiple: true
+
       - name: Notify Discord
-        if: success()
+        if: always()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           COMMIT_SHA: ${{ github.sha }}
-          TEST_RESULT: ${{ steps.tests.outcome }}
-          TEST_PROFILE: ${{ matrix.profile }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TEST_PROFILES: performance,sit,uat,qa,security,chaos,alpha,beta
         shell: bash
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
@@ -70,34 +91,58 @@ jobs:
             exit 0
           fi
 
-          python3 - <<'PY' > discord-payload.json
+          python3 - <<'PY'
           import json
           import os
+          from pathlib import Path
 
           run_url = os.environ["RUN_URL"]
+          log_files = sorted(Path("test-logs").glob("test-*.log"))
+          logs_by_profile = {
+              log_file.stem.removeprefix("test-"): log_file for log_file in log_files
+          }
+          combined_log = Path("combined-test-logs.txt")
+          summaries = []
+
+          with combined_log.open("w", encoding="utf-8") as output:
+              for log_file in log_files:
+                  content = log_file.read_text(encoding="utf-8", errors="replace")
+                  output.write(f"\n{'=' * 20} {log_file.stem} {'=' * 20}\n")
+                  output.write(content)
+                  if not content.endswith("\n"):
+                      output.write("\n")
+
+          for profile in os.environ["TEST_PROFILES"].split(","):
+              log_file = logs_by_profile.get(profile)
+              if log_file is None:
+                  result = "LOG MISSING"
+              else:
+                  content = log_file.read_text(encoding="utf-8", errors="replace")
+                  if "Result: FAILED" in content:
+                      result = "FAILED"
+                  elif "Result: PASSED" in content:
+                      result = "PASSED"
+                  else:
+                      result = "INCOMPLETE"
+              summaries.append(f"{profile}: {result}")
+
+          status = os.environ["TEST_RESULT"].upper()
           payload = {
               "allowed_mentions": {"parse": []},
-              "embeds": [{
-                  "title": f"GitHub Actions SUCCEEDED — run {os.environ['RUN_ID']}",
-                  "url": run_url,
-                  "description": (
-                      f"**API tests:** {os.environ['TEST_RESULT']}\n"
-                      f"**Profile:** {os.environ['TEST_PROFILE']}\n"
-                      f"[Workflow run]({run_url})"
-                  ),
-                  "color": 0x2ECC71,
-                  "footer": {
-                      "text": (
-                          f"Attempt {os.environ['RUN_ATTEMPT']} · "
-                          f"commit {os.environ['COMMIT_SHA'][:7]}"
-                      )
-                  },
-              }],
+              "content": (
+                  f"**API tests {status} — run {os.environ['RUN_ID']}**\n"
+                  + "\n".join(f"• {summary}" for summary in summaries)
+                  + (
+                      f"\nAttempt {os.environ['RUN_ATTEMPT']} · "
+                      f"commit {os.environ['COMMIT_SHA'][:7]}"
+                  )
+                  + f"\n[Workflow run]({run_url})"
+              ),
           }
-          print(json.dumps(payload))
+          Path("discord-payload.json").write_text(json.dumps(payload), encoding="utf-8")
           PY
 
-          curl --fail --silent --show-error --max-time 15 \
-            -H 'Content-Type: application/json' \
-            --data-binary @discord-payload.json \
+          curl --fail --silent --show-error --max-time 30 \
+            -F 'payload_json=<discord-payload.json' \
+            -F 'files[0]=@combined-test-logs.txt;type=text/plain' \
             "$DISCORD_WEBHOOK_URL"
