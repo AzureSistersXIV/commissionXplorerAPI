@@ -52,7 +52,7 @@ jobs:
 
       - name: Upload test log
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: api-test-log-${{ matrix.profile }}-${{ github.run_id }}
           path: test-${{ matrix.profile }}.log
@@ -66,7 +66,7 @@ jobs:
     steps:
       - name: Download test logs
         if: always()
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: api-test-log-*-${{ github.run_id }}
           path: test-logs
@@ -77,6 +77,7 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           COMMIT_SHA: ${{ github.sha }}
@@ -126,18 +127,30 @@ jobs:
                       result = "INCOMPLETE"
               summaries.append(f"{profile}: {result}")
 
-          status = os.environ["TEST_RESULT"].upper()
+          test_result = os.environ["TEST_RESULT"]
+          failed = test_result in ("failure", "cancelled") or any(
+              result.endswith(("FAILED", "LOG MISSING", "INCOMPLETE"))
+              for result in summaries
+          )
+          outcome = "FAILED" if failed else "SUCCEEDED"
+          description = f"**Repository:** {os.environ['REPOSITORY']}\n"
+          description += "\n".join(f"**{summary}**" for summary in summaries)
+          description += f"\n[Workflow run and logs]({run_url})"
+
           payload = {
               "allowed_mentions": {"parse": []},
-              "content": (
-                  f"**API tests {status} — run {os.environ['RUN_ID']}**\n"
-                  + "\n".join(f"• {summary}" for summary in summaries)
-                  + (
-                      f"\nAttempt {os.environ['RUN_ATTEMPT']} · "
-                      f"commit {os.environ['COMMIT_SHA'][:7]}"
-                  )
-                  + f"\n[Workflow run]({run_url})"
-              ),
+              "embeds": [{
+                  "title": f"GitHub Actions {outcome} — run {os.environ['RUN_ID']}",
+                  "url": run_url,
+                  "description": description,
+                  "color": 0x2ECC71 if not failed else 0xE74C3C,
+                  "footer": {
+                      "text": (
+                          f"Attempt {os.environ['RUN_ATTEMPT']} · "
+                          f"commit {os.environ['COMMIT_SHA'][:7]}"
+                      )
+                  },
+              }],
           }
           Path("discord-payload.json").write_text(json.dumps(payload), encoding="utf-8")
           PY
