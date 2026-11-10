@@ -39,16 +39,7 @@ if (!array_key_exists($artist, $known)) {
     fail(404, 'Artist not recognized');
 }
 
-// Invalidate/delete all artist thumbnail caches so artists.php is forced to regenerate them[cite: 1, 2]
-foreach (glob(sys_get_temp_dir() . '/artist_thumbs_*.json') as $cacheFile) {
-    if (is_file($cacheFile)) {
-        @unlink($cacheFile);
-    }
-}
-
-// Explore the artist's commissions folder.[cite: 2]
-// The second argument keeps the existing behaviour of deleting[cite: 2]
-// desktop.ini / Thumbs.db / @eaDir while scanning.[cite: 2]
+// Explore the artist's commissions folder.
 $path = getRepositories()['commissions'] . $artist;
 $files = is_dir($path) ? collectFiles($path) : [];
 

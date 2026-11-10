@@ -6,11 +6,26 @@ $projectRoot = dirname(__DIR__);
 $tempRoot = sys_get_temp_dir() . '/commissionXplorer-tests-' . bin2hex(random_bytes(6));
 $apiRoot = $tempRoot . '/serve/api';
 $commissionsRoot = $tempRoot . '/commissions';
-$thumbsRoot = $tempRoot . '/serve/thumbs';
+$thumbsRoot = $tempRoot . '/thumbs';
 $cacheRoot = $tempRoot . '/cache';
 /** @var array{port: int, process: resource, pipes: array<int, resource>}|null */
 $server = null;
 $assertions = 0;
+$profiles = [
+    'performance',
+    'sit',
+    'uat',
+    'qa',
+    'security',
+    'chaos',
+    'alpha',
+    'beta',
+];
+$profile = $argv[1] ?? 'all';
+if ($profile !== 'all' && !in_array($profile, $profiles, true)) {
+    fwrite(STDERR, 'Unknown profile "' . $profile . '". Choose all or: ' . implode(', ', $profiles) . "\n");
+    exit(2);
+}
 
 function assertSameValue(mixed $expected, mixed $actual, string $message): void
 {
@@ -69,6 +84,13 @@ function requestApi(string $path, string $method = 'GET', ?array $json = null): 
     return [$status, $body];
 }
 
+function timedRequestApi(string $path, string $method = 'GET', ?array $json = null): array
+{
+    $start = hrtime(true);
+    [$status, $body] = requestApi($path, $method, $json);
+    return [$status, $body, (hrtime(true) - $start) / 1_000_000];
+}
+
 function jsonResponse(string $body): mixed
 {
     try {
@@ -82,6 +104,14 @@ function clearArtistCache(): void
 {
     global $cacheRoot;
     foreach (glob($cacheRoot . '/artist_thumbs_*.json') ?: [] as $cacheFile) {
+        unlink($cacheFile);
+    }
+}
+
+function clearFileIndexCache(): void
+{
+    global $cacheRoot;
+    foreach (glob($cacheRoot . '/commission_file_index_*.json') ?: [] as $cacheFile) {
         unlink($cacheFile);
     }
 }
@@ -306,8 +336,13 @@ function runTests(): void
         'NoThumb' => 0, 'EmptyArtist' => 0,
     ], JSON_THROW_ON_ERROR));
 
+    clearArtistCache();
+    [, $body] = requestApi('artists.php?isNsfw=0');
+    $artistCacheFiles = glob($GLOBALS['cacheRoot'] . '/artist_thumbs_*.json') ?: [];
+    assertSameValue(1, count($artistCacheFiles), 'artists.php stores its response cache');
     [$status, $body] = requestApi('artworks.php', 'GET', ['artist' => 'Level0']);
     assertSameValue(200, $status, 'artworks.php accepts a GET JSON body');
+    assertTrue(is_file($artistCacheFiles[0]), 'artworks.php does not evict unrelated artist response caches');
     assertSameValue(1, count(jsonResponse($body)), 'artworks.php lists artist commission files');
     foreach ([[], ['artist' => ''], ['artist' => 123], ['artist' => null]] as $invalidArtist) {
         [$status, $body] = requestApi('artworks.php', 'GET', $invalidArtist);
@@ -340,8 +375,13 @@ function runTests(): void
     [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/missing.jpg']);
     assertTrue($status >= 500, 'thumbnail.php reports a missing source as a server failure, not a success response');
 
+    clearFileIndexCache();
     [, $body] = requestApi('progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level0']);
     assertSameValue(1.0, (float)jsonResponse($body), 'progress endpoint reports complete thumbnail coverage');
+    $indexFiles = glob($GLOBALS['cacheRoot'] . '/commission_file_index_*.json') ?: [];
+    assertSameValue(1, count($indexFiles), 'progress creates a shared file metadata cache');
+    $fileIndex = json_decode((string)file_get_contents($indexFiles[0]), true);
+    assertSameValue(false, $fileIndex['index']['Level0']['latest_ready'], 'progress indexing avoids latest-file mtime work');
     [, $body] = requestApi('progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level1']);
     assertSameValue(0.5, (float)jsonResponse($body), 'progress endpoint reports partial thumbnail coverage');
     [, $body] = requestApi('progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'EmptyArtist']);
@@ -362,6 +402,18 @@ function runTests(): void
         $missingArtistProgress >= 0.0 && $missingArtistProgress <= 1.0,
         'a missing progress artist scans the repository roots and returns a ratio'
     );
+
+    writeTestImage($GLOBALS['commissionsRoot'] . '/Level0/b.jpg');
+    [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/b.jpg']);
+    assertSameValue(200, $status, 'thumbnail generation succeeds after the file index has been cached');
+    $artistCacheFiles = glob($GLOBALS['cacheRoot'] . '/artist_thumbs_*.json') ?: [];
+    assertSameValue([], $artistCacheFiles, 'thumbnail generation invalidates artist thumbnail responses');
+    [$status, $body] = requestApi('stats.php');
+    assertSameValue(200, $status, 'stats.php returns success');
+    $stats = jsonResponse($body);
+    assertSameValue(2, $stats['nsfw']['commissions']['details']['Level0'], 'stats includes newly added commissions after thumbnail generation');
+    assertSameValue(3, $stats['nsfw']['thumbnails']['details']['Level0'], 'stats includes newly generated thumbnails after cache invalidation');
+
     [$status] = requestApi('api/progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level0']);
     assertSameValue(404, $status, 'the saved local collection progress URL has a doubled api path');
 
@@ -375,6 +427,147 @@ function runTests(): void
     [$status, $body] = requestApi('showAllProgress.php');
     assertSameValue(200, $status, 'showAllProgress.php accepts invalid artist configuration');
     assertSameValue([], jsonResponse($body), 'invalid artist configuration returns an empty list');
+
+    file_put_contents($apiRoot . '/levels.json', json_encode([
+        'Level0' => 0, 'Level1' => 1, 'Level2' => 2, 'Level3' => 3, 'Level4' => 4,
+        'NoThumb' => 0, 'EmptyArtist' => 0,
+    ], JSON_THROW_ON_ERROR));
+    clearArtistCache();
+    clearFileIndexCache();
+}
+
+function runProfileTests(string $profile): void
+{
+    global $profiles, $thumbsRoot, $cacheRoot;
+
+    if ($profile === 'all' || $profile === 'performance') {
+        clearFileIndexCache();
+        [$coldStatus, $coldBody, $coldMs] = timedRequestApi('showAllProgress.php');
+        assertSameValue(200, $coldStatus, 'cold progress request succeeds');
+        assertTrue(is_array(jsonResponse($coldBody)), 'cold progress response remains valid JSON');
+        $warmTimes = [];
+        for ($i = 0; $i < 10; $i++) {
+            [$status, $body, $elapsedMs] = timedRequestApi('showAllProgress.php');
+            assertSameValue(200, $status, 'warm progress request succeeds');
+            assertTrue(is_array(jsonResponse($body)), 'warm progress response remains valid JSON');
+            $warmTimes[] = $elapsedMs;
+        }
+        sort($warmTimes);
+        $p95Ms = $warmTimes[(int)ceil(count($warmTimes) * 0.95) - 1];
+        assertTrue($coldMs < 5000, 'cold progress request completes within 5 seconds');
+        assertTrue($p95Ms < 1000, 'warm progress p95 completes within 1 second');
+        fwrite(STDOUT, sprintf(
+            "Performance: cold %.2f ms; warm p95 %.2f ms (10 requests)\n",
+            $coldMs,
+            $p95Ms
+        ));
+    }
+
+    if ($profile === 'all' || $profile === 'sit') {
+        [$status, $body] = requestApi('artists.php?isNsfw=0');
+        assertSameValue(200, $status, 'SIT: API serves artist data over HTTP');
+        assertTrue(is_array(jsonResponse($body)), 'SIT: artist response is valid JSON');
+        [$status, $body] = requestApi('showAllProgress.php');
+        assertSameValue(200, $status, 'SIT: progress endpoint communicates with repository data');
+        assertSameValue(1.0, (float)jsonResponse($body)['Level0'], 'SIT: progress reflects thumbnails');
+    }
+
+    if ($profile === 'all' || $profile === 'uat') {
+        [$status, $body] = requestApi('artists.php?isNsfw=1&inclusive=true');
+        assertSameValue(200, $status, 'UAT: users can browse artists through their selected rating');
+        assertTrue(isset(jsonResponse($body)['Level1']), 'UAT: artist list contains the selected rating');
+        [$status, $body] = requestApi('artworks.php', 'GET', ['artist' => 'Level1']);
+        assertSameValue(200, $status, 'UAT: users can open an artist artwork list');
+        assertSameValue(2, count(jsonResponse($body)), 'UAT: artwork list shows the artist files');
+        [$status, $body] = requestApi('progress.php', 'POST', [
+            'action' => 'thumbnails',
+            'artist' => 'Level1',
+        ]);
+        assertSameValue(200, $status, 'UAT: users can check thumbnail progress');
+        assertSameValue(0.5, (float)jsonResponse($body), 'UAT: progress matches expected partial completion');
+    }
+
+    if ($profile === 'all' || $profile === 'qa') {
+        [$status, $body] = requestApi('artworks.php', 'GET', ['artist' => 'Unknown']);
+        assertSameValue(404, $status, 'QA: unknown artists retain the documented error status');
+        assertSameValue(
+            ['error' => 'Artist not recognized'],
+            jsonResponse($body),
+            'QA: unknown artist error payload remains backward compatible'
+        );
+        [$status, $body] = requestApi('last.php?isNsfw=0');
+        assertSameValue(200, $status, 'QA: latest-artwork endpoint remains available');
+        assertTrue(isset(jsonResponse($body)['Level0']), 'QA: latest-artwork response retains artist keys');
+    }
+
+    if ($profile === 'all' || $profile === 'security') {
+        foreach ([
+            ['artist' => '../api/api.json'],
+            ['artist' => '/etc/passwd'],
+            ['artist' => ['Level0']],
+        ] as $invalidArtist) {
+            [$status, $body] = requestApi('artworks.php', 'GET', $invalidArtist);
+            assertTrue(
+                in_array($status, [400, 404], true),
+                'Security: malformed or unrecognized artist input is rejected'
+            );
+            assertTrue(
+                !str_contains($body, '"commissions"'),
+                'Security: rejected artist input does not disclose repository configuration'
+            );
+        }
+    }
+
+    if ($profile === 'all' || $profile === 'chaos') {
+        $indexFiles = glob($cacheRoot . '/commission_file_index_*.json') ?: [];
+        if ($indexFiles === []) {
+            requestApi('showAllProgress.php');
+            $indexFiles = glob($cacheRoot . '/commission_file_index_*.json') ?: [];
+        }
+        assertSameValue(1, count($indexFiles), 'Chaos: baseline metadata cache exists');
+        file_put_contents($indexFiles[0], '{corrupt cache');
+        [$status, $body] = requestApi('showAllProgress.php');
+        assertSameValue(200, $status, 'Chaos: API recovers from a corrupt metadata cache');
+        assertSameValue(1.0, (float)jsonResponse($body)['Level0'], 'Chaos: recovery returns valid progress');
+        $repaired = json_decode((string)file_get_contents($indexFiles[0]), true);
+        assertTrue(is_array($repaired['index'] ?? null), 'Chaos: corrupt cache is replaced with valid metadata');
+
+        removeTree($thumbsRoot . '/Level4');
+        clearFileIndexCache();
+        [$status, $body] = requestApi('stats.php');
+        assertSameValue(200, $status, 'Chaos: stats stays available when an artist thumbnail directory is missing');
+        assertSameValue(0, jsonResponse($body)['sfw']['thumbnails']['details']['Level4'], 'Chaos: missing thumbnail directory is counted as empty');
+        makeDirectory($thumbsRoot . '/Level4');
+        file_put_contents($thumbsRoot . '/Level4/a.jpg.webp', 'fixture thumbnail');
+        clearFileIndexCache();
+    }
+
+    if ($profile === 'all' || $profile === 'alpha') {
+        foreach ([
+            ['artists.php?isNsfw=0', 'GET', null],
+            ['artworks.php', 'GET', ['artist' => 'Level0']],
+            ['last.php?isNsfw=0', 'GET', null],
+            ['stats.php', 'GET', null],
+            ['showAllProgress.php', 'GET', null],
+        ] as [$path, $method, $payload]) {
+            [$status, $body] = requestApi($path, $method, $payload);
+            assertSameValue(200, $status, 'Alpha: critical integrated endpoint succeeds: ' . $path);
+            assertTrue(is_array(jsonResponse($body)), 'Alpha: endpoint returns valid JSON: ' . $path);
+        }
+    }
+
+    if ($profile === 'all' || $profile === 'beta') {
+        [$status, $body] = requestApi('artworks.php', 'GET', ['artist' => 'Level1']);
+        assertSameValue(200, $status, 'Beta: limited-user artwork smoke test succeeds');
+        assertSameValue(2, count(jsonResponse($body)), 'Beta: limited-user sees the expected artwork list');
+        [$status, $body] = requestApi('progress.php', 'POST', [
+            'action' => 'thumbnails',
+            'artist' => 'Level1',
+        ]);
+        assertSameValue(200, $status, 'Beta: limited-user progress smoke test succeeds');
+        assertSameValue(0.5, (float)jsonResponse($body), 'Beta: limited-user sees correct progress');
+    }
+
 }
 
 try {
@@ -384,7 +577,8 @@ try {
 
     initializeFixtures();
     runTests();
-    fwrite(STDOUT, "OK ($assertions assertions)\n");
+    runProfileTests($profile);
+    fwrite(STDOUT, "OK ($assertions assertions; profile: $profile)\n");
 } catch (Throwable $exception) {
     fwrite(STDERR, "FAIL: " . $exception->getMessage() . "\n");
     $exitCode = 1;

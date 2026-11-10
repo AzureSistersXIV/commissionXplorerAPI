@@ -2,6 +2,7 @@
 
 const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
 const TRUE_LEVEL = 2;          // what ?isNsfw=true means
+const FILE_INDEX_TTL = 600;
 
 require_once "./thumbimage.class.php";
 
@@ -204,6 +205,213 @@ function newestThumbnail(string $path): ?string
 }
 
 /**
+ * Collect file counts and the newest file without retaining every path.
+ *
+ * @param array{file_count: int, image_count: int, latest_file: ?string, latest_mtime: int} $summary
+ */
+function summarizeFiles(string $path, array &$summary, bool $trackLatest = false): void
+{
+    global $toIgnore;
+
+    $entries = @scandir($path);
+    if ($entries === false) {
+        return;
+    }
+
+    $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
+    foreach ($entries as $entry) {
+        if ($entry === "." || $entry === ".." || in_array($entry, $toRemove, true)) {
+            continue;
+        }
+
+        $fullPath = $path . "/" . $entry;
+        if (is_dir($fullPath)) {
+            summarizeFiles($fullPath, $summary, $trackLatest);
+            continue;
+        }
+
+        $extension = pathinfo($entry, PATHINFO_EXTENSION);
+        if ($extension === "" || in_array($extension, $toIgnore, true)) {
+            continue;
+        }
+
+        $summary['file_count']++;
+        if (in_array($extension, ["jpg", "jpeg", "png", "PNG", "gif"], true)) {
+            $summary['image_count']++;
+        }
+
+        if ($trackLatest) {
+            $mtime = @filemtime($fullPath) ?: 0;
+            if ($mtime > $summary['latest_mtime']) {
+                $summary['latest_file'] = $fullPath;
+                $summary['latest_mtime'] = $mtime;
+            }
+        }
+    }
+}
+
+/**
+ * Get cached file metadata for the requested artists.
+ *
+ * The cache is invalidated when either configuration file changes and expires
+ * periodically to pick up filesystem changes made outside this API.
+ *
+ * @param array<int, string|int>|null $requestedArtists Defaults to all configured artists.
+ * @return array<string|int, array{
+ *   scanned_at: int,
+ *   latest_ready: bool,
+ *   commissions: array{file_count: int, image_count: int, latest_file: ?string, latest_mtime: int},
+ *   thumbnails: array{file_count: int, image_count: int, latest_file: ?string, latest_mtime: int}
+ * }>
+ */
+function getArtistFileIndex(?array $requestedArtists = null, bool $includeLatest = false): array
+{
+    $repositories = getRepositories();
+    $artistFile = __DIR__ . "/levels.json";
+    $configFile = __DIR__ . "/api.json";
+    $cacheFile = sys_get_temp_dir() . "/commission_file_index_"
+        . sha1($repositories["commissions"] . "\0" . $repositories["thumbs"]) . ".json";
+    $signature = [
+        'artists' => is_file($artistFile) ? hash_file('sha256', $artistFile) : null,
+        'config' => is_file($configFile) ? hash_file('sha256', $configFile) : null,
+    ];
+    $artists = json_decode((string)file_get_contents($artistFile), true);
+    if (!is_array($artists)) {
+        $artists = [];
+    }
+    $requestedArtists ??= array_keys($artists);
+    $requestedArtists = array_values(array_filter(
+        array_unique($requestedArtists),
+        static fn($artist): bool =>
+            (is_string($artist) || is_int($artist)) && array_key_exists($artist, $artists)
+    ));
+
+    $readCache = static function () use ($cacheFile, $signature): ?array {
+        if (!is_file($cacheFile)) {
+            return null;
+        }
+        $cached = json_decode((string)file_get_contents($cacheFile), true);
+        if (
+            !is_array($cached)
+            || ($cached['signature'] ?? null) !== $signature
+            || !isset($cached['index'])
+            || !is_array($cached['index'])
+        ) {
+            return null;
+        }
+        return $cached['index'];
+    };
+
+    $index = $readCache() ?? [];
+    $needsRefresh = static function (array $candidateIndex) use ($requestedArtists, $includeLatest): bool {
+        foreach ($requestedArtists as $artist) {
+            $scannedAt = $candidateIndex[$artist]['scanned_at'] ?? 0;
+            if (
+                !is_int($scannedAt)
+                || time() - $scannedAt >= FILE_INDEX_TTL
+                || ($includeLatest && ($candidateIndex[$artist]['latest_ready'] ?? false) !== true)
+            ) {
+                return true;
+            }
+        }
+        return false;
+    };
+    $selectRequested = static fn(array $candidateIndex): array =>
+        array_intersect_key($candidateIndex, array_flip($requestedArtists));
+
+    if (!$needsRefresh($index)) {
+        return $selectRequested($index);
+    }
+
+    $lock = @fopen($cacheFile . ".lock", "c");
+    if ($lock !== false && flock($lock, LOCK_EX)) {
+        $index = $readCache() ?? [];
+        if (!$needsRefresh($index)) {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            return $selectRequested($index);
+        }
+    } else {
+        error_log("Unable to lock file metadata cache; rebuilding without a lock.");
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        $lock = false;
+    }
+
+    foreach ($requestedArtists as $artist) {
+        $commissionSummary = [
+            'file_count' => 0,
+            'image_count' => 0,
+            'latest_file' => null,
+            'latest_mtime' => 0,
+        ];
+        $thumbnailSummary = [
+            'file_count' => 0,
+            'image_count' => 0,
+            'latest_file' => null,
+            'latest_mtime' => 0,
+        ];
+        summarizeFiles($repositories["commissions"] . $artist, $commissionSummary, $includeLatest);
+        summarizeFiles($repositories["thumbs"] . $artist, $thumbnailSummary);
+        $index[$artist] = [
+            'scanned_at' => time(),
+            'latest_ready' => $includeLatest,
+            'commissions' => $commissionSummary,
+            'thumbnails' => $thumbnailSummary,
+        ];
+    }
+
+    if (is_resource($lock)) {
+        $payload = json_encode([
+            'signature' => $signature,
+            'index' => $index,
+        ]);
+        $temporaryFile = $cacheFile . "." . getmypid() . ".tmp";
+        if ($payload === false || file_put_contents($temporaryFile, $payload, LOCK_EX) === false) {
+            error_log("Unable to write file metadata cache.");
+            @unlink($temporaryFile);
+        } elseif (!rename($temporaryFile, $cacheFile)) {
+            error_log("Unable to publish file metadata cache.");
+            @unlink($temporaryFile);
+        }
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+
+    return $selectRequested($index);
+}
+
+/**
+ * Invalidate filesystem-derived API responses after thumbnail generation.
+ */
+function invalidateFilesystemCaches(): void
+{
+    $repositories = getRepositories();
+    $indexFile = sys_get_temp_dir() . "/commission_file_index_"
+        . sha1($repositories["commissions"] . "\0" . $repositories["thumbs"]) . ".json";
+    $lock = @fopen($indexFile . ".lock", "c");
+    if ($lock !== false && flock($lock, LOCK_EX)) {
+        if (is_file($indexFile) && !unlink($indexFile)) {
+            error_log("Unable to invalidate file metadata cache.");
+        }
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    } else {
+        error_log("Unable to lock file metadata cache for invalidation.");
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+    }
+
+    foreach (glob(sys_get_temp_dir() . '/artist_thumbs_*.json') ?: [] as $cacheFile) {
+        if (is_file($cacheFile) && !unlink($cacheFile)) {
+            error_log("Unable to invalidate artist thumbnail cache: " . $cacheFile);
+        }
+    }
+}
+
+/**
  * Get the most recent file in a directory (recursively) and its datetime.
  *
  * @param string $path The directory path to explore.
@@ -304,7 +512,9 @@ function getFullPaths(string $artwork): array
 
         // Create the thumbnail image
         $objThumbImage = new ThumbImage($host . $commPath);
-        $objThumbImage->createThumb($host . $thumbPath, 250);
+        if ($objThumbImage->createThumb($host . $thumbPath, 250)) {
+            invalidateFilesystemCaches();
+        }
     }
 
     return [$host . $commPath, $host . $thumbPath];
@@ -331,10 +541,11 @@ function verifyPercentage(): array
     }
 
     $percentages = [];
+    $index = getArtistFileIndex(array_keys($artists));
 
     // Evaluate every artist in the dataset and store their calculated percentage.
     foreach ($artists as $artist => $sfw) {
-        $percentages[$artist] = getPercentage($artist);
+        $percentages[$artist] = percentageFromIndex($index[$artist] ?? null);
     }
 
     return $percentages;
@@ -352,44 +563,43 @@ function verifyPercentage(): array
  */
 function getPercentage(string $artist): float
 {
-    // Load repository paths from JSON config.
-    // Expected format:
-    // {
-    //   "thumbs": "/path/to/thumbs/",
-    //   "commissions": "/path/to/commissions/"
-    // }
-    $repositories = json_decode(file_get_contents("api.json"), true);
+    if ($artist === "") {
+        $repositories = getRepositories();
+        $commissionSummary = [
+            'file_count' => 0,
+            'image_count' => 0,
+            'latest_file' => null,
+            'latest_mtime' => 0,
+        ];
+        $thumbnailSummary = [
+            'file_count' => 0,
+            'image_count' => 0,
+            'latest_file' => null,
+            'latest_mtime' => 0,
+        ];
+        summarizeFiles($repositories["commissions"], $commissionSummary);
+        summarizeFiles($repositories["thumbs"], $thumbnailSummary);
+        return percentageFromIndex([
+            'commissions' => $commissionSummary,
+            'thumbnails' => $thumbnailSummary,
+        ]);
+    }
 
-    // Default to empty strings if the config keys are missing, to avoid warnings.
-    $thumbsBase = $repositories["thumbs"] ?? "";
-    $commissionsBase = $repositories["commissions"] ?? "";
+    $index = getArtistFileIndex([$artist]);
+    return percentageFromIndex($index[$artist] ?? null);
+}
 
-    // Explore the artist's thumbnails folder and commissions folder.
-    // These functions likely return arrays of filenames or file paths.
-    $thumbsPath = explorePath($thumbsBase . $artist);
-    $commsPath = explorePath($commissionsBase . $artist);
-
-    // Keep only valid image files in the commissions folder.
-    // Supported extensions are common web image formats.
-    $commFolder = array_filter($commsPath, function ($file) {
-        $extension = pathinfo($file, PATHINFO_EXTENSION);
-        return in_array($extension, ["jpg", "jpeg", "png", "PNG", "gif"]);
-    });
-
-    // If there are no commission images, return 0.0 to avoid division by zero.
-    if (count($commFolder) != 0) {
-        // Compute ratio of thumbnails to commissions.
-        $ratio = count($thumbsPath) / count($commFolder);
-
-        // Clamp the result to a maximum of 1.0
-        // because an artist cannot have more than 100% of the available commissions
-        // represented in thumbnails.
-        if ($ratio > 1.0) {
-            return 1.0;
-        }
-
-        return $ratio;
-    } else {
+/**
+ * Calculate thumbnail coverage using indexed file counts.
+ *
+ * @param array{commissions: array{image_count: int}, thumbnails: array{file_count: int}}|null $artistIndex
+ */
+function percentageFromIndex(?array $artistIndex): float
+{
+    $commissionCount = $artistIndex['commissions']['image_count'] ?? 0;
+    if ($commissionCount === 0) {
         return 0.0;
     }
+
+    return min(1.0, ($artistIndex['thumbnails']['file_count'] ?? 0) / $commissionCount);
 }

@@ -18,41 +18,33 @@ require_once "./utilitaires.php";
 
 // Load artists data from JSON file
 $artists = json_decode(file_get_contents("levels.json"), true);
-// Load the path to commissions from the configuration file
-$pathCommission = json_decode(file_get_contents("api.json"), true)['commissions'];
-$pathThumbs = json_decode(file_get_contents("api.json"), true)['thumbs'];
+$fileIndex = getArtistFileIndex();
 
 $sfw = ["artists" => ["count" => 0, "details" => []], "commissions" => ["count" => 0, "details" => []], "thumbnails" => ["count" => 0, "details" => []]];
 $nsfw = ["artists" => ["count" => 0, "details" => []], "commissions" => ["count" => 0, "details" => []], "thumbnails" => ["count" => 0, "details" => []]];
 
 foreach($artists as $artist => $key){
-	$comms = explorePath($pathCommission.$artist, true);
-	try{
-		$thumbs = explorePath($pathThumbs.$artist, true);
-	}catch(Exception $e){
-		http_response_code(200);
-    	echo json_encode(['error' => "\"{$artist}\" has no thumbnails."]);
-		exit(0);
-	}
+	$commsCount = $fileIndex[$artist]['commissions']['file_count'] ?? 0;
+	$thumbsCount = $fileIndex[$artist]['thumbnails']['file_count'] ?? 0;
 
 	if($key){
 		$sfw["artists"]["count"]++;
 		$sfw["artists"]["details"][] = $artist;
 
-		$sfw["commissions"]["count"] += count($comms);
-		$sfw["commissions"]["details"][$artist] = count($comms);
+		$sfw["commissions"]["count"] += $commsCount;
+		$sfw["commissions"]["details"][$artist] = $commsCount;
 
-		$sfw["thumbnails"]["count"] += count($thumbs);
-		$sfw["thumbnails"]["details"][$artist] = count($thumbs);
+		$sfw["thumbnails"]["count"] += $thumbsCount;
+		$sfw["thumbnails"]["details"][$artist] = $thumbsCount;
 	}else{
 		$nsfw["artists"]["count"]++;
 		$nsfw["artists"]["details"][] = $artist;
 
-		$nsfw["commissions"]["count"] += count($comms);
-		$nsfw["commissions"]["details"][$artist] = count($comms);
+		$nsfw["commissions"]["count"] += $commsCount;
+		$nsfw["commissions"]["details"][$artist] = $commsCount;
 
-		$nsfw["thumbnails"]["count"] += count($thumbs);
-		$nsfw["thumbnails"]["details"][$artist] = count($thumbs);
+		$nsfw["thumbnails"]["count"] += $thumbsCount;
+		$nsfw["thumbnails"]["details"][$artist] = $thumbsCount;
 	}
 }
 

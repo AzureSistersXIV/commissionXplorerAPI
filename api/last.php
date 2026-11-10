@@ -23,18 +23,21 @@ $artists = array_filter($artists, function ($artist) use ($query) : bool {
     return $artist <= $query; // Keep artists with a level less than or equal to the query parameter
 });
 
-// Load repository paths from JSON file
-$repositories = json_decode(file_get_contents("api.json"), true);
+// Load repository paths
+$repositories = getRepositories();
+$fileIndex = getArtistFileIndex(array_keys($artists), true);
 
 // Iterate through each artist and set the thumbnail path
 foreach ($artists as $artist => $sfw) {
     $isDir = is_dir($repositories["thumbs"] . $artist);
     if ($isDir) {
-        // Explore the directory and get last file with datetime
-        $folder = getLastFileWithDatetime($repositories["commissions"] . $artist);
-
-        // Set the first item in the folder as the thumbnail
-        $artists[$artist] = $folder;
+        $latest = $fileIndex[$artist]['commissions'] ?? null;
+        $artists[$artist] = $latest !== null && $latest['latest_file'] !== null
+            ? [
+                'file' => $latest['latest_file'],
+                'datetime' => date('Y-m-d H:i:s', $latest['latest_mtime']),
+            ]
+            : null;
     } else {
         // Set a default image if the directory does not exist,
         // keeping the SAME shape as the branch above (array with file + datetime)

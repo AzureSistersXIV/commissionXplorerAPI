@@ -11,6 +11,18 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - performance
+          - sit
+          - uat
+          - qa
+          - security
+          - chaos
+          - alpha
+          - beta
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -21,19 +33,20 @@ jobs:
           php-version: '8.3'
           extensions: imagick
 
-      - name: Run tests and write log
+      - name: Run ${{ matrix.profile }} profile and write log
         id: tests
         shell: bash
         run: |
           set -o pipefail
-          printf 'API test run: %s\nCommit: %s\n\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee test.log
-          sh ./run-tests.sh 2>&1 | tee -a test.log
+          printf 'API test profile: %s\nRun: %s\nCommit: %s\n\n' \
+            "${{ matrix.profile }}" "$GITHUB_RUN_ID" "$GITHUB_SHA" | tee test.log
+          sh ./run-tests.sh "${{ matrix.profile }}" 2>&1 | tee -a test.log
 
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: api-test-log-${{ github.run_id }}
+          name: api-test-log-${{ matrix.profile }}-${{ github.run_id }}
           path: test.log
           if-no-files-found: warn
           retention-days: 30
@@ -47,6 +60,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           COMMIT_SHA: ${{ github.sha }}
           TEST_RESULT: ${{ steps.tests.outcome }}
+          TEST_PROFILE: ${{ matrix.profile }}
         shell: bash
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
@@ -68,6 +82,7 @@ jobs:
                   "url": run_url,
                   "description": (
                       f"**API tests:** {os.environ['TEST_RESULT']}\n"
+                      f"**Profile:** {os.environ['TEST_PROFILE']}\n"
                       f"[Workflow run]({run_url})"
                   ),
                   "color": 0x2ECC71,

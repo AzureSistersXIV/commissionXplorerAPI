@@ -168,6 +168,11 @@ ratios. An invalid or empty `levels.json` is treated as an empty artist list
 and yields an empty JSON array. Artists with no commission images have a
 progress ratio of `0.0`; ratios are capped at `1.0`.
 
+File counts and latest-commission metadata are cached for up to ten minutes to
+avoid rescanning the repositories on every progress, statistics, and latest
+artwork request. The API invalidates this cache when it generates a thumbnail;
+filesystem changes made outside the API may take up to ten minutes to appear.
+
 ## Error handling and client expectations
 
 Only `artworks.php` defines explicit client errors in the saved implementation:
@@ -188,20 +193,47 @@ the export.
 
 ## Run the use-case tests
 
-Run the integration tests from the repository root:
+Run every profile from the repository root:
 
 ```sh
 ./run-tests.sh
 ```
 
-You can also run the PHP test script directly with `php tests/run.php`.
+Run a single profile by passing its name:
+
+```sh
+./run-tests.sh performance
+./run-tests.sh sit
+./run-tests.sh uat
+./run-tests.sh qa
+./run-tests.sh security
+./run-tests.sh chaos
+./run-tests.sh alpha
+./run-tests.sh beta
+```
+
+Each profile runs the base API regression suite and its own additional checks:
+
+- **Performance** measures cold and warm all-artist progress responses and
+  enforces response-time ceilings.
+- **SIT** checks HTTP communication between API endpoints and repository data.
+- **UAT** checks the artist browsing, artwork listing, and progress user flows.
+- **QA** checks representative response status, shape, and backward-compatible
+  error contracts.
+- **Security** checks that malformed or unrecognized artist inputs are
+  rejected without exposing repository configuration. This is not a
+  penetration test or a substitute for specialist security review.
+- **Chaos** checks recovery from a corrupt metadata cache and a missing
+  thumbnail directory using temporary fixtures.
+- **Alpha** runs critical integrated endpoint smoke tests.
+- **Beta** runs limited-user smoke checks against the local fixture server; it
+  does not contact a public staging environment.
+
 The runner starts a local PHP development server and uses temporary fixture
 files; it does not modify the repository's commission or thumbnail data. PHP
-8.1 or later and the Imagick extension are required.
-
-GitHub Actions runs the same test command on pushes, pull requests, and manual
-workflow runs. Each run writes `test.log` at the repository root and uploads it
-as a 30-day artifact. To enable Discord notifications, add a repository Actions
-secret named `DISCORD_WEBHOOK_URL` containing the channel's webhook URL. If the
-secret is not configured, tests still run and the notification step emits a
-warning.
+8.1 or later and the Imagick extension are required. GitHub Actions runs all
+eight profiles as a matrix on pushes, pull requests, and manual workflow runs.
+Each profile uploads its test log as a 30-day artifact. To enable Discord
+notifications, add a repository Actions secret named `DISCORD_WEBHOOK_URL`
+containing the channel's webhook URL. If the secret is not configured, tests
+still run and the notification step emits a warning.
