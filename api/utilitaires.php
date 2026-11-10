@@ -4,6 +4,8 @@ const MAX_LEVEL = 4;           // highest level in the data (used for clamping)
 const TRUE_LEVEL = 2;          // what ?isNsfw=true means
 const FILE_INDEX_TTL = 600;
 const ARTWORK_LIST_TTL = 600;
+const THUMBNAIL_WIDTH = 250;      // width in pixels of generated thumbnails
+const THUMBNAIL_MIN_BYTES = 1500; // lighter thumbnails are suspect (possibly cut by an old generator)
 
 require_once "./thumbimage.class.php";
 
@@ -732,6 +734,78 @@ function getLastFileWithDatetime(string $path): ?array
 }
 
 /**
+ * Tells whether a WebP file is a complete container: the size declared in its
+ * RIFF header must match the real file size (detects truncated writes).
+ *
+ * @param string $path Path to the WebP file.
+ * @return bool True if the file is a complete WebP container.
+ */
+function webpIsComplete(string $path): bool
+{
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return false;
+    }
+    $head = fread($handle, 12);
+    fclose($handle);
+    if (strlen($head) < 12 || substr($head, 0, 4) !== 'RIFF' || substr($head, 8, 4) !== 'WEBP') {
+        return false;
+    }
+    $declaredSize = unpack('V', substr($head, 4, 4))[1];
+    return $declaredSize + 8 === filesize($path);
+}
+
+/**
+ * Tells whether a thumbnail must be (re)generated.
+ *
+ * A thumbnail is regenerated when it is:
+ *  - missing, or older than its source file;
+ *  - not a complete WebP file (truncated or corrupt);
+ *  - not of the expected width (THUMBNAIL_WIDTH);
+ *  - suspiciously light (under THUMBNAIL_MIN_BYTES) AND older than the thumbnail
+ *    generator. Such a file may be a leftover cut by an earlier version of
+ *    ThumbImage; once regenerated it is newer than the generator, so a picture
+ *    that is legitimately tiny is not regenerated again on every request.
+ *
+ * Only cheap checks run here (file headers). The expensive comparison with a
+ * freshly generated thumbnail is left to the audit_thumbs.php command line script.
+ *
+ * @param string $source Path to the original artwork.
+ * @param string $thumb Path to the thumbnail file.
+ * @return bool True if the thumbnail must be generated again.
+ */
+function thumbnailNeedsRegeneration(string $source, string $thumb): bool
+{
+    if (!is_file($thumb)) {
+        return true;
+    }
+
+    $thumbTime = filemtime($thumb);
+    $sourceTime = filemtime($source);
+    if ($thumbTime === false || $sourceTime === false || $thumbTime < $sourceTime) {
+        return true;
+    }
+
+    if (!webpIsComplete($thumb)) {
+        return true;
+    }
+
+    $imageInfo = @getimagesize($thumb);
+    if ($imageInfo === false || $imageInfo[0] !== THUMBNAIL_WIDTH) {
+        return true;
+    }
+
+    if (filesize($thumb) < THUMBNAIL_MIN_BYTES) {
+        $generatorTime = filemtime(__DIR__ . '/thumbimage.class.php');
+        if ($generatorTime !== false && $thumbTime < $generatorTime) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Get the full paths for an artwork and its thumbnail.
  *
  * @param string $artwork The relative path to the artwork.
@@ -743,7 +817,8 @@ function getFullPaths(string $artwork): array
     // Set error reporting settings
     ini_set('display_errors', 0);
     ini_set('log_errors', 1);
-    ini_set('error_log', '/path/to/custom.log');
+    // No custom error_log path: the placeholder "/path/to/custom.log" made
+    // thumbnail errors unreadable. PHP's configured error log is used instead.
 
     $host = "../";
     $commPath = $artwork;
@@ -763,8 +838,8 @@ function getFullPaths(string $artwork): array
         throw new RuntimeException("Unable to create thumbnail directory.");
     }
 
-    // Check if the thumbnail file exists
-    if (!file_exists("../" . $thumbPath)) {
+    // Check if the thumbnail is missing or older than the artwork
+    if (thumbnailNeedsRegeneration("../" . $commPath, "../" . $thumbPath)) {
         $destination = $host . $thumbPath;
         $lockPath = sys_get_temp_dir() . "/thumbnail_" . sha1($destination) . ".lock";
         $lock = @fopen($lockPath, "c");
@@ -777,10 +852,13 @@ function getFullPaths(string $artwork): array
         }
 
         try {
-            if (!file_exists("../" . $thumbPath)) {
+            // Re-check under the lock: another request may have just generated it.
+            if (thumbnailNeedsRegeneration("../" . $commPath, "../" . $thumbPath)) {
                 $objThumbImage = new ThumbImage($host . $commPath);
-                if ($objThumbImage->createThumb($destination, 250)) {
+                if ($objThumbImage->createThumb($destination, THUMBNAIL_WIDTH)) {
                     invalidateFilesystemCaches();
+                } else {
+                    error_log("Thumbnail generation failed for " . $commPath);
                 }
             }
         } finally {
