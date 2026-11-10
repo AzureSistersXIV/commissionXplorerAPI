@@ -204,6 +204,40 @@ if (!$imagickAvailable) {
 			. "                        env | grep MAGICK_TIME_LIMIT\n";
 		exit(1);
 	}
+
+	// The pixel cache of a large source can need hundreds of megabytes. /tmp is
+	// often a small tmpfs on NAS boxes, where ImageMagick then fails with
+	// "CacheResourcesExhausted"; put its cache on the thumbnail volume instead.
+	$cacheDirectory = realpath($thumbsDir);
+	if ($cacheDirectory === false) {
+		$cacheDirectory = $thumbsDir;
+	}
+	if (is_writable($cacheDirectory) && function_exists('putenv')) {
+		putenv('MAGICK_TEMPORARY_PATH=' . $cacheDirectory);
+	}
+
+	// Apply the same pixel cache limits as ThumbImage, then report what actually
+	// applies: a policy.xml value caps them, and a low cap is the cause of
+	// "CacheResourcesExhausted" on large sources.
+	$cacheLimits = [
+		Imagick::RESOURCETYPE_MEMORY => ThumbImage::CACHE_MEMORY_BYTES,
+		Imagick::RESOURCETYPE_MAP => ThumbImage::CACHE_MAP_BYTES,
+		Imagick::RESOURCETYPE_DISK => ThumbImage::CACHE_DISK_BYTES,
+	];
+	foreach ($cacheLimits as $type => $value) {
+		Imagick::setResourceLimit($type, $value);
+	}
+
+	$formatLimit = static function (int $type): string {
+		$value = Imagick::getResourceLimit($type);
+		return is_numeric($value) && $value > 0
+			? (string) (intdiv((int) $value, 1048576))
+			: 'unlimited';
+	};
+	echo "ImageMagick cache limits: memory " . $formatLimit(Imagick::RESOURCETYPE_MEMORY)
+		. " MB, map " . $formatLimit(Imagick::RESOURCETYPE_MAP)
+		. " MB, disk " . $formatLimit(Imagick::RESOURCETYPE_DISK) . " MB\n";
+	echo "ImageMagick cache directory: " . $cacheDirectory . "\n";
 }
 
 $counts = ['checked' => 0, 'bad' => 0, 'fixed' => 0, 'orphans' => 0, 'unregenerable' => 0, 'truncated' => 0];

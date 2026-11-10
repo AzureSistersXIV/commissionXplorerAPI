@@ -10,6 +10,12 @@ class ThumbImage
 	// ImageMagick, instead of being loaded whole in PHP memory.
 	private const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 
+	// Pixel cache limits. They are public so audit_thumbs.php can report the
+	// values that actually apply (policy.xml can lower them).
+	public const CACHE_MEMORY_BYTES = 128 * 1024 * 1024;
+	public const CACHE_MAP_BYTES = 512 * 1024 * 1024;
+	public const CACHE_DISK_BYTES = 2048 * 1024 * 1024;
+
 	// Picture source for thumbnail.
     private $source;
 
@@ -181,12 +187,25 @@ class ThumbImage
 		}
 		
 		$temporaryPath = $destImagePath . "." . getmypid() . "." . bin2hex(random_bytes(6)) . ".tmp";
+
+		// A large source can need hundreds of megabytes of pixel cache. /tmp is
+		// often a small tmpfs on NAS boxes, which makes ImageMagick fail with
+		// "CacheResourcesExhausted"; keep the cache on the thumbnail volume.
+		// Callers (getFullPaths, the audit) may already have chosen a directory.
+		if (getenv('MAGICK_TEMPORARY_PATH') === false) {
+			$cacheDirectory = dirname($destImagePath);
+			if (is_dir($cacheDirectory) && is_writable($cacheDirectory)
+				&& function_exists('putenv')) {
+				putenv('MAGICK_TEMPORARY_PATH=' . $cacheDirectory);
+			}
+		}
+
 		$thumb = null;
 		try {
 			$resourceLimits = [
-				Imagick::RESOURCETYPE_MEMORY => 128 * 1024 * 1024,
-				Imagick::RESOURCETYPE_MAP => 256 * 1024 * 1024,
-				Imagick::RESOURCETYPE_DISK => 512 * 1024 * 1024,
+				Imagick::RESOURCETYPE_MEMORY => self::CACHE_MEMORY_BYTES,
+				Imagick::RESOURCETYPE_MAP => self::CACHE_MAP_BYTES,
+				Imagick::RESOURCETYPE_DISK => self::CACHE_DISK_BYTES,
 				Imagick::RESOURCETYPE_THREAD => 1,
 				Imagick::RESOURCETYPE_WIDTH => 100000,
 				Imagick::RESOURCETYPE_HEIGHT => 100000,
@@ -294,7 +313,7 @@ class ThumbImage
 
 			return true;
 		} catch (Throwable $e) {
-			error_log("Thumbnail creation failed: " . $e->getMessage());
+			error_log("Thumbnail creation failed for " . $this->source . ": " . $e->getMessage());
 			return false;
 		} finally {
 			if ($thumb instanceof Imagick) {

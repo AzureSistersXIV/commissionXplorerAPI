@@ -867,6 +867,14 @@ function getFullPaths(string $artwork): array
         try {
             // Re-check under the lock: another request may have just generated it.
             if (thumbnailNeedsRegeneration("../" . $commPath, "../" . $thumbPath)) {
+                // The pixel cache of a large source can need hundreds of megabytes.
+                // /tmp is often a small tmpfs on NAS boxes, so keep it on the
+                // thumbnail volume instead ("CacheResourcesExhausted" otherwise).
+                $cacheDirectory = realpath(dirname($destination));
+                if ($cacheDirectory !== false && is_writable($cacheDirectory)
+                    && function_exists('putenv')) {
+                    putenv('MAGICK_TEMPORARY_PATH=' . $cacheDirectory);
+                }
                 $objThumbImage = new ThumbImage($host . $commPath);
                 if ($objThumbImage->createThumb($destination, THUMBNAIL_SIZE)) {
                     invalidateFilesystemCaches();
