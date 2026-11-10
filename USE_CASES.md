@@ -139,9 +139,13 @@ Content-Type: application/json
 The response contains the artwork and corresponding thumbnail paths. A
 thumbnail is generated when one does not already exist. The collection
 demonstrates the plural `artworks` form; the endpoint also accepts a singular
-`artwork` value.
+`artwork` value. Thumbnails are WebP images whose focused side is 250 pixels:
+the height for landscape sources, the width for portrait or square sources.
 GIF thumbnails are static WebP images made from the first composited animation
-frame, preserving that frame's logical canvas, offsets, and transparency.
+frame, preserving that frame's logical canvas, offsets, and transparency. A
+truncated PNG, JPEG or WebP source, or a source that changes while it is read,
+is rejected instead of becoming a partial thumbnail; the endpoint logs the
+failure and leaves the thumbnail missing so the next request can try again.
 
 ### Thumbnail edge and failure cases
 

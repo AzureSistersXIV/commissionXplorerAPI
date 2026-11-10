@@ -159,6 +159,18 @@ function writeTestImage(string $path): void
     }
 }
 
+function writeTestPng(string $path, int $width, int $height): void
+{
+    $image = new Imagick();
+    $image->newImage($width, $height, new ImagickPixel('red'));
+    $image->setImageFormat('png');
+    if (!$image->writeImage($path)) {
+        $image->clear();
+        throw new RuntimeException("Could not create fixture image: $path");
+    }
+    $image->clear();
+}
+
 function writePartialFrameGif(string $path): void
 {
     $firstFrame = new Imagick();
@@ -489,16 +501,53 @@ function runTests(): void
     [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/partial.gif']);
     assertSameValue(200, $status, 'thumbnail.php generates a thumbnail for a partial-frame GIF');
     $gifThumbnail = new Imagick($thumbsRoot . '/Level0/partial.gif.webp');
-    assertSameValue(250, $gifThumbnail->getImageWidth(), 'GIF thumbnail uses the configured width');
-    assertSameValue(188, $gifThumbnail->getImageHeight(), 'GIF thumbnail preserves the full logical canvas ratio');
+    assertSameValue(250, $gifThumbnail->getImageHeight(), 'GIF thumbnail uses the configured size on its focused side');
+    assertTrue(
+        abs($gifThumbnail->getImageWidth() / 250 - 40 / 30) < 0.01,
+        'GIF thumbnail preserves the full logical canvas ratio'
+    );
     $compositedPixel = $gifThumbnail->getImagePixelColor(100, 100)->getColor();
     assertTrue(
         $compositedPixel['r'] > 200 && $compositedPixel['g'] < 50 && $compositedPixel['b'] < 50,
         'GIF thumbnail includes the first frame at its logical canvas offset'
     );
-    $transparentPixel = $gifThumbnail->getImagePixelColor(200, 100)->getColor();
+    $transparentPixel = $gifThumbnail->getImagePixelColor(300, 100)->getColor();
     assertSameValue(0, $transparentPixel['a'], 'GIF thumbnail preserves transparency outside the first frame');
     $gifThumbnail->clear();
+
+    // Landscape sources are sized by height; the result must then be accepted as
+    // up to date instead of being regenerated on every request.
+    $fixtureArtist = 'Fixture';
+    makeDirectory($commissionsRoot . '/' . $fixtureArtist);
+    $landscapeSource = $commissionsRoot . '/' . $fixtureArtist . '/landscape.png';
+    writeTestPng($landscapeSource, 400, 200);
+    touch($landscapeSource, 1700000500);
+    [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Fixture/landscape.png']);
+    assertSameValue(200, $status, 'thumbnail.php generates a landscape thumbnail');
+    $landscapeThumbPath = $thumbsRoot . '/Fixture/landscape.png.webp';
+    assertTrue(is_file($landscapeThumbPath), 'the landscape thumbnail is published');
+    $landscapeThumbnail = new Imagick($landscapeThumbPath);
+    assertSameValue(500, $landscapeThumbnail->getImageWidth(), 'landscape thumbnails keep their aspect ratio');
+    assertSameValue(250, $landscapeThumbnail->getImageHeight(), 'landscape thumbnails are sized by height');
+    $landscapeThumbnail->clear();
+    $landscapeTime = filemtime($landscapeThumbPath);
+    sleep(1);
+    requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Fixture/landscape.png']);
+    clearstatcache(true, $landscapeThumbPath);
+    assertSameValue($landscapeTime, filemtime($landscapeThumbPath), 'an up-to-date landscape thumbnail is not regenerated');
+
+    // A truncated source must not publish a cut thumbnail (partial decode).
+    $truncatedSource = $commissionsRoot . '/' . $fixtureArtist . '/truncated.png';
+    writeTestPng($truncatedSource, 120, 80);
+    $png = (string)file_get_contents($truncatedSource);
+    file_put_contents($truncatedSource, substr($png, 0, -12)); // drop the IEND chunk
+    touch($truncatedSource, 1700000600);
+    [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Fixture/truncated.png']);
+    assertSameValue(200, $status, 'thumbnail.php answers when the source is truncated');
+    assertTrue(
+        !file_exists($thumbsRoot . '/Fixture/truncated.png.webp'),
+        'a truncated source never publishes a partial thumbnail'
+    );
 
     clearFileIndexCache();
     [, $body] = requestApi('progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level0']);
