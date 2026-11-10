@@ -4,7 +4,7 @@ header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Headers: Content-Type");
 header('Content-Type: application/json; charset=utf-8');
 
-// Include utility functions (must provide getRepositories() and newestThumbnail())
+// Include utility functions
 require_once "./utilitaires.php";
 
 const DEFAULT_THUMB = "./assets/img/folder.svg";
@@ -16,9 +16,15 @@ $rawNsfw = $_GET["isNsfw"] ?? null;
 $maxLevel = parseMaxLevel(is_string($rawNsfw) ? $rawNsfw : null);
 
 $inclusive = filter_var($_GET["inclusive"] ?? false, FILTER_VALIDATE_BOOLEAN);
+$specialNsfwFilter = !is_numeric($rawNsfw) && $rawNsfw === "true";
+$filterMode = $specialNsfwFilter ? "nsfw-true" : ($inclusive ? "inclusive" : "exact");
+$cacheKey = hash("sha256", json_encode([
+    'level' => $maxLevel,
+    'mode' => $filterMode,
+]));
 
 // Serve from cache when it is fresh and newer than levels.json
-$cacheFile = sys_get_temp_dir() . "/artist_thumbs_{$maxLevel}.json";
+$cacheFile = sys_get_temp_dir() . "/artist_thumbs_{$cacheKey}.json";
 if (
     is_file($cacheFile)
     && time() - filemtime($cacheFile) < CACHE_TTL
@@ -31,7 +37,7 @@ if (
 // Load artists data from JSON file
 $artists = json_decode(file_get_contents("levels.json"), true) ?? [];
 
-if (!is_numeric($rawNsfw) && $rawNsfw === "true") {
+if ($specialNsfwFilter) {
     $artists = array_filter(
         $artists,
         fn($level): bool => in_array($level, [1, 2], true)
@@ -44,11 +50,10 @@ if (!is_numeric($rawNsfw) && $rawNsfw === "true") {
     );
 }
 
-// Resolve each artist's thumbnail: the one whose original commission is newest
-$thumbsBase = getRepositories()["thumbs"];
+$fileIndex = getArtistFileIndex(array_keys($artists), true);
 
 foreach ($artists as $artist => $level) {
-    $artists[$artist] = newestThumbnail($thumbsBase . $artist) ?? DEFAULT_THUMB;
+    $artists[$artist] = $fileIndex[$artist]['thumbnails']['latest_file'] ?? DEFAULT_THUMB;
 }
 
 // Sort artists naturally and case-insensitively

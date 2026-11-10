@@ -43,11 +43,9 @@ The `inclusive` option does not change the special lowercase `isNsfw=true`
 behavior. With no matching artists, the endpoint returns an empty JSON array.
 An artist with no usable thumbnail gets the default folder image.
 
-Artist results are cached for up to 10 minutes. The cache key uses the parsed
-rating level but not `inclusive` or the special lowercase-`true` filter. As a
-result, requests such as `isNsfw=true` and `isNsfw=2` (or inclusive and
-non-inclusive numeric requests) can temporarily reuse each other's cached
-result, depending on which request populated the cache first.
+Artist results are cached for up to 10 minutes. The cache key distinguishes
+exact-level, inclusive, and special lowercase-`true` filters. Newest-thumbnail
+paths are served from the shared filesystem metadata index.
 
 The Insomnia collection includes boundary and invalid-input probes (`0`, `1`,
 `2`, `3`, `4`, `99`, `-1`, an empty value, `banana`, and `TRUE`). These probe
@@ -93,6 +91,21 @@ Content-Type: application/json
 
 The endpoint returns the artist's commission file paths. It requires a known,
 non-empty artist name.
+
+For large collections, request an optional page with `limit` (1–500). Continue
+using the returned opaque `nextCursor` with the same artist and limit:
+
+```http
+GET /artworks.php?limit=50
+Content-Type: application/json
+
+{"artist":"Kuronoyuu"}
+```
+
+Paginated responses have the shape `{"items":[...],"nextCursor":"...","hasMore":true}`.
+The cursor is `null` on the final page. If `limit` is omitted, the endpoint
+retains its legacy response shape: a full array of paths. A cursor without a
+limit or a malformed cursor returns HTTP 400.
 
 | Input case | Result |
 | --- | --- |

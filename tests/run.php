@@ -304,7 +304,14 @@ function runTests(): void
     [, $body] = requestApi('artists.php?isNsfw=true');
     $trueArtists = array_keys(jsonResponse($body));
     [, $body] = requestApi('artists.php?isNsfw=2');
-    assertSameValue($trueArtists, array_keys(jsonResponse($body)), 'artist cache is shared by requests with the same parsed rating');
+    assertSameValue(['Level1', 'Level2'], $trueArtists, 'special true filter includes levels 1 and 2');
+    assertSameValue(['Level2'], array_keys(jsonResponse($body)), 'exact-level filter does not reuse the special true cache');
+    [, $body] = requestApi('artists.php?isNsfw=2&inclusive=true');
+    assertSameValue(
+        ['EmptyArtist', 'Level0', 'Level1', 'Level2', 'NoThumb'],
+        array_keys(jsonResponse($body)),
+        'inclusive filter does not reuse the exact-level cache'
+    );
 
     clearArtistCache();
     file_put_contents($apiRoot . '/levels.json', '[]');
@@ -344,6 +351,38 @@ function runTests(): void
     assertSameValue(200, $status, 'artworks.php accepts a GET JSON body');
     assertTrue(is_file($artistCacheFiles[0]), 'artworks.php does not evict unrelated artist response caches');
     assertSameValue(1, count(jsonResponse($body)), 'artworks.php lists artist commission files');
+
+    [$status, $body] = requestApi('artworks.php?limit=1', 'GET', ['artist' => 'Level1']);
+    assertSameValue(200, $status, 'artworks.php accepts an opt-in page size');
+    $firstPage = jsonResponse($body);
+    assertSameValue(1, count($firstPage['items']), 'artworks.php limits the first page');
+    assertSameValue(true, $firstPage['hasMore'], 'artworks.php reports when another page exists');
+    assertTrue(is_string($firstPage['nextCursor']), 'artworks.php returns a cursor for the next page');
+    [$status, $body] = requestApi(
+        'artworks.php?limit=1&cursor=' . rawurlencode($firstPage['nextCursor']),
+        'GET',
+        ['artist' => 'Level1']
+    );
+    assertSameValue(200, $status, 'artworks.php accepts a continuation cursor');
+    $secondPage = jsonResponse($body);
+    assertSameValue(1, count($secondPage['items']), 'artworks.php returns the remaining item');
+    assertSameValue(false, $secondPage['hasMore'], 'artworks.php marks the final page');
+    assertSameValue(null, $secondPage['nextCursor'], 'artworks.php omits a continuation cursor on the final page');
+    assertTrue(
+        $firstPage['items'][0] !== $secondPage['items'][0],
+        'artworks.php cursor pages do not repeat items'
+    );
+    [$status] = requestApi(
+        'artworks.php?limit=1&cursor=' . rawurlencode($firstPage['nextCursor']),
+        'GET',
+        ['artist' => 'Level0']
+    );
+    assertSameValue(400, $status, 'artworks.php rejects a cursor belonging to another artist');
+    [$status] = requestApi('artworks.php?limit=0', 'GET', ['artist' => 'Level1']);
+    assertSameValue(400, $status, 'artworks.php rejects a zero page size');
+    [$status] = requestApi('artworks.php?cursor=invalid', 'GET', ['artist' => 'Level1']);
+    assertSameValue(400, $status, 'artworks.php requires a page size when a cursor is supplied');
+
     foreach ([[], ['artist' => ''], ['artist' => 123], ['artist' => null]] as $invalidArtist) {
         [$status, $body] = requestApi('artworks.php', 'GET', $invalidArtist);
         assertSameValue(400, $status, 'artworks.php rejects missing or invalid artist input');
@@ -406,6 +445,14 @@ function runTests(): void
     writeTestImage($GLOBALS['commissionsRoot'] . '/Level0/b.jpg');
     [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/b.jpg']);
     assertSameValue(200, $status, 'thumbnail generation succeeds after the file index has been cached');
+    assertTrue(
+        is_file($tempRoot . '/thumbs/Level0/b.jpg.webp'),
+        'thumbnail generation publishes the expected file while holding its per-thumbnail lock'
+    );
+    assertTrue(
+        !file_exists($tempRoot . '/thumbs/Level0/b.jpg.webp.lock'),
+        'thumbnail generation lock files stay outside the thumbnail repository'
+    );
     $artistCacheFiles = glob($GLOBALS['cacheRoot'] . '/artist_thumbs_*.json') ?: [];
     assertSameValue([], $artistCacheFiles, 'thumbnail generation invalidates artist thumbnail responses');
     [$status, $body] = requestApi('stats.php');
@@ -413,6 +460,13 @@ function runTests(): void
     $stats = jsonResponse($body);
     assertSameValue(2, $stats['nsfw']['commissions']['details']['Level0'], 'stats includes newly added commissions after thumbnail generation');
     assertSameValue(3, $stats['nsfw']['thumbnails']['details']['Level0'], 'stats includes newly generated thumbnails after cache invalidation');
+    clearArtistCache();
+    [, $body] = requestApi('artists.php?isNsfw=0');
+    assertSameValue(
+        $tempRoot . '/thumbs/Level0/b.jpg.webp',
+        jsonResponse($body)['Level0'],
+        'artists.php uses newest-thumbnail metadata from the shared file index'
+    );
 
     [$status] = requestApi('api/progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level0']);
     assertSameValue(404, $status, 'the saved local collection progress URL has a doubled api path');

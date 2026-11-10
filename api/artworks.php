@@ -41,8 +41,69 @@ if (!array_key_exists($artist, $known)) {
 
 // Explore the artist's commissions folder.
 $path = getRepositories()['commissions'] . $artist;
-$files = is_dir($path) ? collectFiles($path) : [];
+$rawLimit = $_GET['limit'] ?? getFormParameter('limit');
+$hasLimit = array_key_exists('limit', $_GET) || $rawLimit !== false;
+$rawCursor = $_GET['cursor'] ?? getFormParameter('cursor');
 
-file_put_contents('php://stderr', date('[Y-m-d H:i:s] ') . "Debug2: " . "\n");
+if (!$hasLimit && $rawCursor !== false) {
+    fail(400, 'Cursor requires a limit');
+}
 
-echo json_encode($files);
+if (!$hasLimit) {
+    $files = is_dir($path) ? collectFiles($path) : [];
+    echo json_encode($files);
+    exit;
+}
+
+if (
+    !(is_int($rawLimit) || (is_string($rawLimit) && ctype_digit($rawLimit)))
+    || (int)$rawLimit < 1
+) {
+    fail(400, 'Limit must be an integer between 1 and 500');
+}
+
+$limit = (int)$rawLimit;
+if ($limit > 500) {
+    fail(400, 'Limit must be an integer between 1 and 500');
+}
+
+$offset = 0;
+if ($rawCursor !== false && $rawCursor !== '') {
+    if (!is_string($rawCursor)) {
+        fail(400, 'Invalid cursor');
+    }
+
+    $encodedCursor = strtr($rawCursor, '-_', '+/');
+    $encodedCursor .= str_repeat('=', (4 - strlen($encodedCursor) % 4) % 4);
+    $cursorData = base64_decode($encodedCursor, true);
+    $cursor = $cursorData === false ? null : json_decode($cursorData, true);
+    if (
+        !is_array($cursor)
+        || ($cursor['artist'] ?? null) !== $artist
+        || !isset($cursor['offset'])
+        || !is_int($cursor['offset'])
+        || $cursor['offset'] < 0
+    ) {
+        fail(400, 'Invalid cursor');
+    }
+    if ($cursor['offset'] > PHP_INT_MAX - $limit) {
+        fail(400, 'Cursor offset is out of range');
+    }
+    $offset = $cursor['offset'];
+}
+
+$files = is_dir($path) ? collectFilesPage($path, $offset, $limit + 1) : [];
+$hasMore = count($files) > $limit;
+$items = array_slice($files, 0, $limit);
+$nextCursor = $hasMore
+    ? rtrim(strtr(base64_encode(json_encode([
+        'artist' => $artist,
+        'offset' => $offset + $limit,
+    ], JSON_THROW_ON_ERROR)), '+/', '-_'), '=')
+    : null;
+
+echo json_encode([
+    'items' => $items,
+    'nextCursor' => $nextCursor,
+    'hasMore' => $hasMore,
+]);

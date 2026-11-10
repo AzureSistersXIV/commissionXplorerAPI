@@ -153,6 +153,58 @@ function collectFiles(string $path, bool $remove = false): array
     return $out;
 }
 
+/**
+ * Collect a bounded page of files while traversing in scandir order.
+ *
+ * @return list<string>
+ */
+function collectFilesPage(string $path, int $offset, int $limit): array
+{
+    $files = [];
+    $skipped = 0;
+    $collect = function (string $directory) use (&$collect, &$files, &$skipped, $offset, $limit): bool {
+        global $toIgnore;
+
+        $entries = @scandir($directory);
+        if ($entries === false) {
+            return false;
+        }
+
+        $toRemove = ["desktop.ini", "Thumbs.db", "@eaDir"];
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === ".." || in_array($entry, $toRemove, true)) {
+                continue;
+            }
+
+            $fullPath = $directory . "/" . $entry;
+            if (is_dir($fullPath)) {
+                if ($collect($fullPath)) {
+                    return true;
+                }
+                continue;
+            }
+
+            $extension = pathinfo($entry, PATHINFO_EXTENSION);
+            if ($extension === "" || in_array($extension, $toIgnore, true)) {
+                continue;
+            }
+            if ($skipped < $offset) {
+                $skipped++;
+                continue;
+            }
+
+            $files[] = $fullPath;
+            if (count($files) >= $limit) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    $collect($path);
+    return $files;
+}
+
 /** Map a thumbnail path to its original commission file's mtime. */
 function commissionMtime(string $thumb, array $repos): int
 {
@@ -209,7 +261,13 @@ function newestThumbnail(string $path): ?string
  *
  * @param array{file_count: int, image_count: int, latest_file: ?string, latest_mtime: int} $summary
  */
-function summarizeFiles(string $path, array &$summary, bool $trackLatest = false): void
+function summarizeFiles(
+    string $path,
+    array &$summary,
+    bool $trackLatest = false,
+    ?array $repositories = null,
+    bool $isThumbnail = false
+): void
 {
     global $toIgnore;
 
@@ -226,7 +284,7 @@ function summarizeFiles(string $path, array &$summary, bool $trackLatest = false
 
         $fullPath = $path . "/" . $entry;
         if (is_dir($fullPath)) {
-            summarizeFiles($fullPath, $summary, $trackLatest);
+            summarizeFiles($fullPath, $summary, $trackLatest, $repositories, $isThumbnail);
             continue;
         }
 
@@ -241,7 +299,9 @@ function summarizeFiles(string $path, array &$summary, bool $trackLatest = false
         }
 
         if ($trackLatest) {
-            $mtime = @filemtime($fullPath) ?: 0;
+            $mtime = $isThumbnail && $repositories !== null
+                ? commissionMtime($fullPath, $repositories)
+                : (@filemtime($fullPath) ?: 0);
             if ($mtime > $summary['latest_mtime']) {
                 $summary['latest_file'] = $fullPath;
                 $summary['latest_mtime'] = $mtime;
@@ -353,7 +413,13 @@ function getArtistFileIndex(?array $requestedArtists = null, bool $includeLatest
             'latest_mtime' => 0,
         ];
         summarizeFiles($repositories["commissions"] . $artist, $commissionSummary, $includeLatest);
-        summarizeFiles($repositories["thumbs"] . $artist, $thumbnailSummary);
+        summarizeFiles(
+            $repositories["thumbs"] . $artist,
+            $thumbnailSummary,
+            $includeLatest,
+            $repositories,
+            true
+        );
         $index[$artist] = [
             'scanned_at' => time(),
             'latest_ready' => $includeLatest,
@@ -490,30 +556,38 @@ function getFullPaths(string $artwork): array
         throw new Exception("Artwork link not found:" . $commPath);
     }
 
-    $dirPath = "";
-    // Split the thumbnail path into directories
-    $words = explode("/", "../" . $thumbPath);
-    foreach ($words as $key => $word) {
-        $dirPath .= $word . ($key < count($words) - 1 ? "/" : "");
-        // Create the directory if it does not exist
-        if (!is_dir($dirPath) && $key < count($words) - 1) {
-            mkdir($dirPath, 0755, false);
-        }
+    $thumbnailDirectory = dirname("../" . $thumbPath);
+    if (
+        !is_dir($thumbnailDirectory)
+        && !@mkdir($thumbnailDirectory, 0755, true)
+        && !is_dir($thumbnailDirectory)
+    ) {
+        throw new RuntimeException("Unable to create thumbnail directory.");
     }
 
     // Check if the thumbnail file exists
     if (!file_exists("../" . $thumbPath)) {
-        // Create the directory for the thumbnail if it does not exist
-        $temp = explode("/", $thumbPath);
-        unset($temp[count($temp) - 1]);
-        $temp = "../" . implode("/", $temp);
-        if (!is_dir($temp))
-            mkdir($temp, 0777, false);
+        $destination = $host . $thumbPath;
+        $lockPath = sys_get_temp_dir() . "/thumbnail_" . sha1($destination) . ".lock";
+        $lock = @fopen($lockPath, "c");
+        if ($lock === false) {
+            throw new RuntimeException("Unable to open thumbnail generation lock.");
+        }
+        if (!flock($lock, LOCK_EX)) {
+            fclose($lock);
+            throw new RuntimeException("Unable to acquire thumbnail generation lock.");
+        }
 
-        // Create the thumbnail image
-        $objThumbImage = new ThumbImage($host . $commPath);
-        if ($objThumbImage->createThumb($host . $thumbPath, 250)) {
-            invalidateFilesystemCaches();
+        try {
+            if (!file_exists("../" . $thumbPath)) {
+                $objThumbImage = new ThumbImage($host . $commPath);
+                if ($objThumbImage->createThumb($destination, 250)) {
+                    invalidateFilesystemCaches();
+                }
+            }
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
         }
     }
 
