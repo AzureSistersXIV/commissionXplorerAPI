@@ -284,8 +284,11 @@ foreach ($iterator as $file) {
 	// A GIF source that does not end with the GIF trailer byte (";") is incomplete.
 	// A thumbnail of it is consistent with the file but shows only part of the picture,
 	// and the comparison with a fresh thumbnail cannot detect that.
-	$sourceExtension = strtolower(pathinfo($source, PATHINFO_EXTENSION));
-	if ($sourceExtension === 'gif' && filesize($source) > 0) {
+	// Use the real image type: several files are PNGs or GIFs with a .jpg name, and
+	// judging by the extension reports perfectly good sources as truncated.
+	$sourceInfo = @getimagesize($source);
+	$sourceType = is_array($sourceInfo) ? $sourceInfo[2] : null;
+	if ($sourceType === IMAGETYPE_GIF && filesize($source) > 0) {
 		$sourceHandle = fopen($source, 'rb');
 		if ($sourceHandle !== false) {
 			fseek($sourceHandle, -1, SEEK_END);
@@ -302,25 +305,10 @@ foreach ($iterator as $file) {
 			}
 		}
 	}
-	// Same for a JPEG without its end-of-image marker. The marker may sit before
-	// trailing metadata, so inspect the last 64 KiB.
-	if (($sourceExtension === 'jpg' || $sourceExtension === 'jpeg') && filesize($source) > 0) {
-		$sourceSize = filesize($source);
-		$sourceHandle = fopen($source, 'rb');
-		if ($sourceHandle !== false) {
-			fseek($sourceHandle, max(0, $sourceSize - 65536));
-			$tail = fread($sourceHandle, 65536);
-			fclose($sourceHandle);
-			if ($tail !== false && strpos($tail, "\xFF\xD9") === false) {
-				$counts['truncated']++;
-				$note = $sourceSize % 1048576 === 0
-					? sprintf(' - exactly %d MiB, typical of an upload or transfer size limit', $sourceSize / 1048576)
-					: '';
-				echo "SOURCE   " . substr($relative, 0, -5)
-					. " (JPEG without its end marker: the source file is probably truncated, $sourceSize bytes$note)\n";
-			}
-		}
-	}
+	// A JPEG without its end-of-image marker is not reported here: some tools
+	// append data after it and the file still decodes completely. A truly
+	// truncated JPEG is caught by the generator (it decodes with a black bottom)
+	// and appears as a "could not be generated" entry below.
 
 	$problems = [];
 	$info = @getimagesize($thumb);
@@ -333,7 +321,7 @@ foreach ($iterator as $file) {
 	if ($info === false) {
 		$problems[] = 'unreadable image';
 	} else {
-		$dimensionProblem = dimensionProblem($info, @getimagesize($source));
+		$dimensionProblem = dimensionProblem($info, $sourceInfo);
 		if ($dimensionProblem !== null) {
 			$problems[] = $dimensionProblem;
 		}

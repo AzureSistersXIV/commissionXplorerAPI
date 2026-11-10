@@ -123,16 +123,9 @@ class ThumbImage
 				}
 				break;
 			case 'JPEG':
-				// The end-of-image marker may be followed by trailing metadata, so
-				// inspect the last 64 KiB rather than only the last two bytes.
-				if (strpos(substr($blob, -65536), "\xFF\xD9") === false) {
-					$size = strlen($blob);
-					$note = $size % 1048576 === 0
-						? sprintf(' - exactly %d MiB, typical of an upload or transfer size limit', $size / 1048576)
-						: '';
-					throw new RuntimeException("JPEG source has no end marker (truncated file, $size bytes$note): "
-						. $this->source);
-				}
+				// A missing end-of-image marker does not mean the pixels are
+				// missing: some tools append data after it. A real truncation is
+				// detected after decoding by decodedImageHasBlackBottom().
 				break;
 			case 'WEBP':
 				$declared = unpack('V', substr($blob, 4, 4))[1];
@@ -152,6 +145,38 @@ class ThumbImage
 				}
 				break;
 		}
+	}
+
+	/**
+	 * Tells whether the bottom band of a decoded image is a solid black area.
+	 *
+	 * A truncated JPEG decodes the rows it has and leaves the rest of the pixel
+	 * cache at zero, which is exactly what a cut thumbnail looks like. Sampling
+	 * avoids copying the (possibly large) source image.
+	 *
+	 * @param Imagick $image    Decoded source image.
+	 * @param float   $fraction Share of the image height to inspect, from the bottom.
+	 * @return bool True when the inspected band is solid black.
+	 */
+	private function decodedImageHasBlackBottom(Imagick $image, float $fraction = 0.35): bool
+	{
+		$width = $image->getImageWidth();
+		$height = $image->getImageHeight();
+		if ($width < 1 || $height < 5) {
+			return false;
+		}
+		$bandHeight = max(1, (int) floor($height * $fraction));
+		$stepX = max(1, (int) floor($width / 16));
+		$stepY = max(1, (int) floor($bandHeight / 16));
+		for ($y = $height - 1; $y >= $height - $bandHeight; $y -= $stepY) {
+			for ($x = 0; $x < $width; $x += $stepX) {
+				$color = $image->getImagePixelColor($x, $y)->getColor();
+				if ($color['r'] > 8 || $color['g'] > 8 || $color['b'] > 8) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -286,6 +311,17 @@ class ThumbImage
 					} catch (Throwable $e) {
 						throw new RuntimeException("Unable to decode the source image ("
 							. strlen($blob) . " bytes): " . $this->source, 0, $e);
+					}
+
+					// A JPEG without its end marker may still be complete (trailing
+					// metadata), but a truncated one decodes its first rows only and
+					// leaves the rest black. Refuse that instead of publishing a cut
+					// thumbnail; a complete decode is accepted.
+					if ($format === 'JPEG'
+						&& strpos(substr($blob, -65536), "\xFF\xD9") === false
+						&& $this->decodedImageHasBlackBottom($thumb)) {
+						throw new RuntimeException("JPEG source has no end marker and decodes partially "
+							. "(truncated file): " . $this->source);
 					}
 
 					// The decoded picture must have the geometry announced by its
