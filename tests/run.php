@@ -159,6 +159,34 @@ function writeTestImage(string $path): void
     }
 }
 
+function writePartialFrameGif(string $path): void
+{
+    $firstFrame = new Imagick();
+    $firstFrame->newImage(20, 20, new ImagickPixel('transparent'));
+    $draw = new ImagickDraw();
+    $draw->setFillColor('red');
+    $draw->rectangle(0, 0, 9, 19);
+    $firstFrame->drawImage($draw);
+    $firstFrame->setImageFormat('gif');
+    $firstFrame->setImagePage(40, 30, 10, 5);
+    $firstFrame->setImageDelay(10);
+    $firstFrame->setImageDispose(1);
+
+    $secondFrame = new Imagick();
+    $secondFrame->newImage(10, 10, new ImagickPixel('blue'));
+    $secondFrame->setImageFormat('gif');
+    $secondFrame->setImagePage(40, 30, 15, 10);
+    $secondFrame->setImageDelay(10);
+    $secondFrame->setImageDispose(1);
+
+    $firstFrame->addImage($secondFrame);
+    if (!$firstFrame->writeImages($path, true)) {
+    	throw new RuntimeException("Could not create fixture GIF: $path");
+    }
+    $firstFrame->clear();
+    $secondFrame->clear();
+}
+
 function removeTree(string $path): void
 {
     if (!is_dir($path)) {
@@ -241,7 +269,7 @@ function initializeFixtures(): void
 
 function runTests(): void
 {
-    global $apiRoot, $tempRoot, $server;
+    global $apiRoot, $tempRoot, $commissionsRoot, $thumbsRoot, $server;
 
     $serverSocket = stream_socket_server('tcp://127.0.0.1:0', $errorCode, $errorMessage);
     if ($serverSocket === false) {
@@ -456,6 +484,22 @@ function runTests(): void
     [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/missing.jpg']);
     assertTrue($status >= 500, 'thumbnail.php reports a missing source as a server failure, not a success response');
 
+    $gifPath = $commissionsRoot . '/Level0/partial.gif';
+    writePartialFrameGif($gifPath);
+    [$status] = requestApi('thumbnail.php', 'POST', ['artwork' => '../commissions/Level0/partial.gif']);
+    assertSameValue(200, $status, 'thumbnail.php generates a thumbnail for a partial-frame GIF');
+    $gifThumbnail = new Imagick($thumbsRoot . '/Level0/partial.gif.webp');
+    assertSameValue(250, $gifThumbnail->getImageWidth(), 'GIF thumbnail uses the configured width');
+    assertSameValue(188, $gifThumbnail->getImageHeight(), 'GIF thumbnail preserves the full logical canvas ratio');
+    $compositedPixel = $gifThumbnail->getImagePixelColor(100, 100)->getColor();
+    assertTrue(
+        $compositedPixel['r'] > 200 && $compositedPixel['g'] < 50 && $compositedPixel['b'] < 50,
+        'GIF thumbnail includes the first frame at its logical canvas offset'
+    );
+    $transparentPixel = $gifThumbnail->getImagePixelColor(200, 100)->getColor();
+    assertSameValue(0, $transparentPixel['a'], 'GIF thumbnail preserves transparency outside the first frame');
+    $gifThumbnail->clear();
+
     clearFileIndexCache();
     [, $body] = requestApi('progress.php', 'POST', ['action' => 'thumbnails', 'artist' => 'Level0']);
     assertSameValue(1.0, (float)jsonResponse($body), 'progress endpoint reports complete thumbnail coverage');
@@ -500,8 +544,8 @@ function runTests(): void
     [$status, $body] = requestApi('stats.php');
     assertSameValue(200, $status, 'stats.php returns success');
     $stats = jsonResponse($body);
-    assertSameValue(2, $stats['nsfw']['commissions']['details']['Level0'], 'stats includes newly added commissions after thumbnail generation');
-    assertSameValue(3, $stats['nsfw']['thumbnails']['details']['Level0'], 'stats includes newly generated thumbnails after cache invalidation');
+    assertSameValue(3, $stats['nsfw']['commissions']['details']['Level0'], 'stats includes newly added commissions after thumbnail generation');
+    assertSameValue(4, $stats['nsfw']['thumbnails']['details']['Level0'], 'stats includes newly generated thumbnails after cache invalidation');
     clearArtistCache();
     [, $body] = requestApi('artists.php?isNsfw=0');
     assertSameValue(

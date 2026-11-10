@@ -140,6 +140,8 @@ The response contains the artwork and corresponding thumbnail paths. A
 thumbnail is generated when one does not already exist. The collection
 demonstrates the plural `artworks` form; the endpoint also accepts a singular
 `artwork` value.
+GIF thumbnails are static WebP images made from the first composited animation
+frame, preserving that frame's logical canvas, offsets, and transparency.
 
 ### Thumbnail edge and failure cases
 

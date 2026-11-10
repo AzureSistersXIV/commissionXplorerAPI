@@ -60,7 +60,19 @@ class ThumbImage
 			}
 
 			$thumb = new Imagick();
-			$thumb->readImage($this->source);
+			$thumb->pingImage($this->source);
+			$isGif = strtoupper($thumb->getImageFormat()) === 'GIF';
+			$thumb->clear();
+
+			if ($isGif) {
+				$thumb->readImage($this->source . '[0]');
+				$compositedFrame = $thumb->coalesceImages();
+				$thumb->clear();
+				$thumb->destroy();
+				$thumb = $compositedFrame;
+			} else {
+				$thumb->readImage($this->source);
+			}
 			$thumb->setIteratorIndex(0);
 			$thumb->setImageCompressionQuality(75);
 			$thumb->thumbnailImage($thumbWidth, 0);
