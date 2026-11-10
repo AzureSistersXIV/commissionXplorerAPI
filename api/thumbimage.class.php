@@ -11,10 +11,12 @@ class ThumbImage
 	private const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 
 	// Pixel cache limits. They are public so audit_thumbs.php can report the
-	// values that actually apply (policy.xml can lower them).
+	// values that actually apply (policy.xml can lower them). The disk limit
+	// stays at 1 GiB: 2 GiB overflows a signed 32-bit integer, which is what a
+	// 32-bit NAS PHP does, and the negative value then disables the disk cache.
 	public const CACHE_MEMORY_BYTES = 128 * 1024 * 1024;
 	public const CACHE_MAP_BYTES = 512 * 1024 * 1024;
-	public const CACHE_DISK_BYTES = 2048 * 1024 * 1024;
+	public const CACHE_DISK_BYTES = 1024 * 1024 * 1024;
 
 	// Picture source for thumbnail.
     private $source;
@@ -121,9 +123,15 @@ class ThumbImage
 				}
 				break;
 			case 'JPEG':
-				// The end-of-image marker may be followed by a few padding bytes.
-				if (strpos(substr($blob, -64), "\xFF\xD9") === false) {
-					throw new RuntimeException("JPEG source has no end marker (truncated file): " . $this->source);
+				// The end-of-image marker may be followed by trailing metadata, so
+				// inspect the last 64 KiB rather than only the last two bytes.
+				if (strpos(substr($blob, -65536), "\xFF\xD9") === false) {
+					$size = strlen($blob);
+					$note = $size % 1048576 === 0
+						? sprintf(' - exactly %d MiB, typical of an upload or transfer size limit', $size / 1048576)
+						: '';
+					throw new RuntimeException("JPEG source has no end marker (truncated file, $size bytes$note): "
+						. $this->source);
 				}
 				break;
 			case 'WEBP':
@@ -273,7 +281,12 @@ class ThumbImage
 					// Very large source: let ImageMagick stream it.
 					$thumb->readImage($this->source);
 				} else {
-					$thumb->readImageBlob($blob);
+					try {
+						$thumb->readImageBlob($blob);
+					} catch (Throwable $e) {
+						throw new RuntimeException("Unable to decode the source image ("
+							. strlen($blob) . " bytes): " . $this->source, 0, $e);
+					}
 
 					// The decoded picture must have the geometry announced by its
 					// header. A scaled JPEG decode is smaller, so compare the ratio.

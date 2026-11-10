@@ -284,7 +284,8 @@ foreach ($iterator as $file) {
 	// A GIF source that does not end with the GIF trailer byte (";") is incomplete.
 	// A thumbnail of it is consistent with the file but shows only part of the picture,
 	// and the comparison with a fresh thumbnail cannot detect that.
-	if (strtolower(pathinfo($source, PATHINFO_EXTENSION)) === 'gif' && filesize($source) > 0) {
+	$sourceExtension = strtolower(pathinfo($source, PATHINFO_EXTENSION));
+	if ($sourceExtension === 'gif' && filesize($source) > 0) {
 		$sourceHandle = fopen($source, 'rb');
 		if ($sourceHandle !== false) {
 			fseek($sourceHandle, -1, SEEK_END);
@@ -298,6 +299,25 @@ foreach ($iterator as $file) {
 					: '';
 				echo "SOURCE   " . substr($relative, 0, -5)
 					. " (GIF without its end byte: the source file is probably truncated, $sourceSize bytes$note)\n";
+			}
+		}
+	}
+	// Same for a JPEG without its end-of-image marker. The marker may sit before
+	// trailing metadata, so inspect the last 64 KiB.
+	if (($sourceExtension === 'jpg' || $sourceExtension === 'jpeg') && filesize($source) > 0) {
+		$sourceSize = filesize($source);
+		$sourceHandle = fopen($source, 'rb');
+		if ($sourceHandle !== false) {
+			fseek($sourceHandle, max(0, $sourceSize - 65536));
+			$tail = fread($sourceHandle, 65536);
+			fclose($sourceHandle);
+			if ($tail !== false && strpos($tail, "\xFF\xD9") === false) {
+				$counts['truncated']++;
+				$note = $sourceSize % 1048576 === 0
+					? sprintf(' - exactly %d MiB, typical of an upload or transfer size limit', $sourceSize / 1048576)
+					: '';
+				echo "SOURCE   " . substr($relative, 0, -5)
+					. " (JPEG without its end marker: the source file is probably truncated, $sourceSize bytes$note)\n";
 			}
 		}
 	}
@@ -391,9 +411,13 @@ foreach ($iterator as $file) {
 	}
 }
 
-echo "\nTruncated GIF sources: {$counts['truncated']}\n";
+echo "\nTruncated sources: {$counts['truncated']}\n";
 echo "Checked: {$counts['checked']}, defective: {$counts['bad']}, repaired: {$counts['fixed']}, "
 	. "orphans: {$counts['orphans']}, not regenerable: {$counts['unregenerable']}\n";
+if ($counts['unregenerable'] > 0) {
+	echo "Some thumbnails could not be rebuilt because their source is incomplete or unreadable\n"
+		. "(see the Thumbnail creation failed lines in the error log). Re-download those sources.\n";
+}
 if (!$imagickAvailable) {
 	echo "Content checks were NOT run (no Imagick): thumbnails of normal size but cut are not detected.\n";
 }
